@@ -29,6 +29,19 @@ async function register() {
                     required: false
                 }
             ]
+        },
+        {
+            name: "horrormaze",
+            description: "Play a 3D horror maze game!",
+            type: 1, // CHAT_INPUT
+            options: [
+                {
+                    name: "allow_others_to_control",
+                    description: "Allow other users to control your game (default: false)",
+                    type: 5, // BOOLEAN type
+                    required: false
+                }
+            ]
         }
     ];
 
@@ -64,14 +77,7 @@ Deno.serve(async (req) => {
     if (req.method !== "GET") {
         return new Response("Method Not Allowed. Use GET to trigger command registration.", { status: 405 });
     }
-    // Automatically run registration when GET request is made
     return await register();
 });
 
 console.log("Command registration server running. Access via GET to register commands.");
-// To register commands immediately if run directly (e.g. `deno run --allow-env --allow-net register_commands.ts`):
-// if (import.meta.main) {
-//   console.log("Running command registration directly...");
-//   const res = await register();
-//   console.log(await res.text());
-// }
