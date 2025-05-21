@@ -1,622 +1,598 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
 
+// --- Utilities ---
 function hexToUint8Array(hex: string): Uint8Array {
-  return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+    return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
 }
 
 const DISCORD_PUBLIC_KEY = Deno.env.get("DISCORD_PUBLIC_KEY");
 if (!DISCORD_PUBLIC_KEY) {
-  throw new Error("DISCORD_PUBLIC_KEY is not set.");
+    throw new Error("DISCORD_PUBLIC_KEY is not set.");
 }
 
-// --- Tetris Constants and Logic ---
-const BOARD_WIDTH = 10;
-const BOARD_HEIGHT = 20;
-const EMPTY_CELL = 0;
-const TETROMINOES = {
-  1: { shape: [[1, 1, 1, 1]], color: "🟦", name: "I" }, // I
-  2: { shape: [[1, 1, 0], [0, 1, 1]], color: "🟥", name: "Z" }, // Z
-  3: { shape: [[0, 1, 1], [1, 1, 0]], color: "🟩", name: "S" }, // S
-  4: { shape: [[1, 1, 1], [0, 1, 0]], color: "🟪", name: "T" }, // T
-  5: { shape: [[1, 1], [1, 1]], color: "🟨", name: "O" },    // O
-  6: { shape: [[1, 0, 0], [1, 1, 1]], color: "🟫", name: "J" }, // J
-  7: { shape: [[0, 0, 1], [1, 1, 1]], color: "🟧", name: "L" }  // L
-};
-const PIECE_TYPES = Object.keys(TETROMINOES).map(Number);
+// --- Game Constants ---
+const MAP_WIDTH = 16;
+const MAP_HEIGHT = 10;
+const TILE_SIZE = 1.0; // For logical coordinates
 
-const EMOJI_MAP: Record<number, string> = {
-  [EMPTY_CELL]: "⬛",
-  1: TETROMINOES[1].color,
-  2: TETROMINOES[2].color,
-  3: TETROMINOES[3].color,
-  4: TETROMINOES[4].color,
-  5: TETROMINOES[5].color,
-  6: TETROMINOES[6].color,
-  7: TETROMINOES[7].color,
-};
+// P = Player Start, E = Enemy Start, # = Wall, . = Floor
+const INITIAL_MAP_LAYOUT: string[] = [
+    "################",
+    "#P.............#",
+    "#..##........E.#",
+    "#...#..........#",
+    "#...#....######",
+    "#..............#",
+    "#......E.......#",
+    "#..............#",
+    "#..............#",
+    "################",
+];
 
-interface TetrisGameState {
-  board: number[][];
-  currentPiece: { type: number; rotation: number; x: number; y: number } | null;
-  nextPieceType: number;
-  score: number;
-  linesCleared: number;
-  level: number;
-  gameOver: boolean;
-  ownerId: string;
-  allowOthers: boolean;
+const VIEW_WIDTH_CHARS = 21; // Number of rays/columns for rendering (odd number for center view)
+const VIEW_HEIGHT_CHARS = 7; // Number of text rows for rendering
+
+const FOV = Math.PI / 3; // 60 degrees field of view
+const PLAYER_ROTATION_SPEED = Math.PI / 16; // Radians per turn action
+const PLAYER_MOVE_SPEED = 0.3; // Tiles per move action
+const ENEMY_MOVE_SPEED = 0.15;
+const MAX_RAY_DEPTH = 20.0;
+
+const PLAYER_MAX_HEALTH = 5;
+const ENEMY_MAX_HEALTH = 3;
+const SHOOT_DAMAGE = 1;
+const SHOOT_RANGE = 8.0; // Max distance for a shot to hit
+
+// Emojis
+const EMOJI_WALL = "🟫"; // Brown Square (Wall)
+const EMOJI_FLOOR = "🟩"; // Green Square (Floor)
+const EMOJI_CEILING = "🟦"; // Blue Square (Ceiling)
+const EMOJI_ENEMY_ALIVE = "😈";
+const EMOJI_ENEMY_DEAD = "💀";
+const EMOJI_EMPTY = "▪️"; // Fallback for empty space if needed in renderer, or a very dark grey.
+const EMOJI_BULLET_TRACE = "💥"; // For temporary shot feedback
+
+// --- Game State Interfaces ---
+interface Coords { x: number; y: number; }
+interface EnemyState extends Coords {
+    hp: number;
+    angle: number; // For potential future use (e.g. facing direction)
+    isActive: boolean;
+}
+interface GameState {
+    px: number; // Player X
+    py: number; // Player Y
+    pa: number; // Player Angle (radians)
+    php: number; // Player Health
+    enemies: EnemyState[];
+    message: string; // Short message to display (e.g., "Ouch!", "Enemy Hit!")
+    gameOver: boolean;
+    // Movement toggles
+    isMovingForward: boolean;
+    isTurningLeft: boolean;
+    isTurningRight: boolean;
+    lastInteractionTime: number;
 }
 
-function createEmptyBoard(): number[][] {
-  return Array(BOARD_HEIGHT).fill(null).map(() => Array(BOARD_WIDTH).fill(EMPTY_CELL));
+// --- Game State Serialization/Deserialization for custom_id ---
+// Format: px;py;pa;php;mf;tl;tr;[e1x;e1y;e1hp;e1active;...];gameOver;lastTime
+// All numbers rounded to 2 decimal places for compactness where applicable
+function serializeGameState(state: GameState): string {
+    const parts: string[] = [];
+    parts.push(state.px.toFixed(2));
+    parts.push(state.py.toFixed(2));
+    parts.push(state.pa.toFixed(3)); // Angle needs more precision
+    parts.push(state.php.toString());
+    parts.push(state.isMovingForward ? "1" : "0");
+    parts.push(state.isTurningLeft ? "1" : "0");
+    parts.push(state.isTurningRight ? "1" : "0");
+
+    state.enemies.forEach(e => {
+        parts.push(e.x.toFixed(2));
+        parts.push(e.y.toFixed(2));
+        parts.push(e.hp.toString());
+        parts.push(e.isActive ? "1" : "0");
+    });
+    parts.push(state.gameOver ? "1" : "0");
+    parts.push(state.lastInteractionTime.toString()); // For inactivity tracking
+
+    return parts.join("|"); // Using pipe as less common in numbers
 }
 
-function getRandomPieceType(): number {
-  return PIECE_TYPES[Math.floor(Math.random() * PIECE_TYPES.length)];
-}
+function deserializeGameState(str: string): GameState | null {
+    try {
+        const parts = str.split("|");
+        let currentIdx = 0;
+        const state: GameState = {
+            px: parseFloat(parts[currentIdx++]),
+            py: parseFloat(parts[currentIdx++]),
+            pa: parseFloat(parts[currentIdx++]),
+            php: parseInt(parts[currentIdx++]),
+            isMovingForward: parts[currentIdx++] === "1",
+            isTurningLeft: parts[currentIdx++] === "1",
+            isTurningRight: parts[currentIdx++] === "1",
+            enemies: [],
+            message: "",
+            gameOver: false,
+            lastInteractionTime: 0,
+        };
 
-function getPieceShape(type: number, rotation: number): number[][] {
-  let shape = TETROMINOES[type as keyof typeof TETROMINOES].shape;
-  for (let r = 0; r < rotation; r++) {
-    shape = shape[0].map((_, colIndex) => shape.map(row => row[colIndex]).reverse());
-  }
-  return shape;
-}
-
-function isValidMove(board: number[][], pieceType: number, rotation: number, x: number, y: number): boolean {
-  const shape = getPieceShape(pieceType, rotation);
-  for (let r = 0; r < shape.length; r++) {
-    for (let c = 0; c < shape[r].length; c++) {
-      if (shape[r][c]) {
-        const boardX = x + c;
-        const boardY = y + r;
-        if (boardX < 0 || boardX >= BOARD_WIDTH || boardY < 0 || boardY >= BOARD_HEIGHT || (board[boardY] && board[boardY][boardX] !== EMPTY_CELL)) {
-          return false;
+        // Assuming 2 enemies for fixed parsing, can be made dynamic
+        for (let i = 0; i < 2; i++) { // Adjust if num enemies changes
+            if (parts.length > currentIdx + 3) {
+                state.enemies.push({
+                    x: parseFloat(parts[currentIdx++]),
+                    y: parseFloat(parts[currentIdx++]),
+                    hp: parseInt(parts[currentIdx++]),
+                    isActive: parts[currentIdx++] === "1",
+                    angle: 0,
+                });
+            } else { // In case of malformed string for enemies part
+                 state.enemies.push({ x: 0, y: 0, hp: 0, isActive: false, angle: 0 });
+            }
         }
-      }
+        state.gameOver = parts[currentIdx++] === "1";
+        state.lastInteractionTime = parseInt(parts[currentIdx++]);
+
+        if (Number.isNaN(state.px) || Number.isNaN(state.php) || state.enemies.some(e => Number.isNaN(e.x))) {
+            console.error("Deserialization resulted in NaN values:", str);
+            return null; // Invalid state
+        }
+        return state;
+    } catch (e) {
+        console.error("Failed to deserialize game state:", str, e);
+        return null;
     }
-  }
-  return true;
 }
 
-function spawnNewPiece(state: TetrisGameState): TetrisGameState {
-    const type = state.nextPieceType;
-    const rotation = 0;
-    const shape = getPieceShape(type, rotation);
-    const x = Math.floor((BOARD_WIDTH - shape[0].length) / 2);
-    const y = 0;
 
-    if (!isValidMove(state.board, type, rotation, x, y)) {
-        return { ...state, gameOver: true, currentPiece: null };
+// --- Map Helper ---
+function getMapTile(x: number, y: number): string {
+    const mapX = Math.floor(x / TILE_SIZE);
+    const mapY = Math.floor(y / TILE_SIZE);
+    if (mapX < 0 || mapX >= MAP_WIDTH || mapY < 0 || mapY >= MAP_HEIGHT) {
+        return "#"; // Treat out-of-bounds as wall
     }
+    return INITIAL_MAP_LAYOUT[mapY][mapX];
+}
+
+function isWall(x: number, y: number): boolean {
+    return getMapTile(x,y) === "#";
+}
+
+// --- Initial Game Setup ---
+function getInitialGameState(): GameState {
+    const enemies: EnemyState[] = [];
+    let playerPos = { x: 1.5, y: 1.5 }; // Default player start
+
+    INITIAL_MAP_LAYOUT.forEach((row, y) => {
+        row.split("").forEach((char, x) => {
+            if (char === 'P') {
+                playerPos = { x: x * TILE_SIZE + TILE_SIZE / 2, y: y * TILE_SIZE + TILE_SIZE / 2 };
+            } else if (char === 'E') {
+                enemies.push({
+                    x: x * TILE_SIZE + TILE_SIZE / 2,
+                    y: y * TILE_SIZE + TILE_SIZE / 2,
+                    hp: ENEMY_MAX_HEALTH,
+                    angle: 0,
+                    isActive: true,
+                });
+            }
+        });
+    });
+     // Ensure we have a fixed number of enemies for consistent serialization
+    while (enemies.length < 2) { // Assuming we want 2 enemies
+        enemies.push({ x: -1, y: -1, hp: 0, angle: 0, isActive: false }); // Inactive, off-map
+    }
+
     return {
-        ...state,
-        currentPiece: { type, rotation, x, y },
-        nextPieceType: getRandomPieceType(),
+        px: playerPos.x,
+        py: playerPos.y,
+        pa: Math.PI / 4, // Initial angle (45 degrees)
+        php: PLAYER_MAX_HEALTH,
+        enemies: enemies.slice(0, 2), // Ensure only 2 enemies
+        message: "Game started! Use buttons to play.",
+        gameOver: false,
+        isMovingForward: false,
+        isTurningLeft: false,
+        isTurningRight: false,
+        lastInteractionTime: Date.now(),
     };
 }
 
-function initialTetrisState(ownerId: string, allowOthers: boolean): TetrisGameState {
-  let state: TetrisGameState = {
-    board: createEmptyBoard(),
-    currentPiece: null,
-    nextPieceType: getRandomPieceType(),
-    score: 0,
-    linesCleared: 0,
-    level: 1,
-    gameOver: false,
-    ownerId,
-    allowOthers,
-  };
-  return spawnNewPiece(state);
-}
+// --- Game Logic Update ---
+function updateGameState(currentState: GameState, action: string): GameState {
+    let newState = JSON.parse(JSON.stringify(currentState)) as GameState; // Deep copy
+    newState.message = ""; // Clear previous message
 
-function placePieceOnBoard(board: number[][], piece: { type: number; rotation: number; x: number; y: number }): number[][] {
-  const newBoard = board.map(row => [...row]);
-  const shape = getPieceShape(piece.type, piece.rotation);
-  for (let r = 0; r < shape.length; r++) {
-    for (let c = 0; c < shape[r].length; c++) {
-      if (shape[r][c]) {
-        newBoard[piece.y + r][piece.x + c] = piece.type;
-      }
+    const now = Date.now();
+    if (now - newState.lastInteractionTime > 30000 && !newState.gameOver) { // 30s inactivity check, example
+        // newState.message = "Game resumed after pause.";
+        // Could add logic here if game should change after long pause, but simple resume is fine.
     }
-  }
-  return newBoard;
-}
+    newState.lastInteractionTime = now;
 
-function clearLines(board: number[][]): { newBoard: number[][]; linesCleared: number } {
-  let newBoard = board.filter(row => row.some(cell => cell === EMPTY_CELL));
-  const linesClearedCount = BOARD_HEIGHT - newBoard.length;
-  while (newBoard.length < BOARD_HEIGHT) {
-    newBoard.unshift(Array(BOARD_WIDTH).fill(EMPTY_CELL));
-  }
-  return { newBoard, linesCleared: linesClearedCount };
-}
 
-function updateScoreAndLevel(state: TetrisGameState, lines: number): TetrisGameState {
-    if (lines === 0) return state;
-    let scoreToAdd = 0;
-    switch(lines) {
-        case 1: scoreToAdd = 100 * state.level; break;
-        case 2: scoreToAdd = 300 * state.level; break;
-        case 3: scoreToAdd = 500 * state.level; break;
-        case 4: scoreToAdd = 800 * state.level; break; // Tetris!
+    if (newState.gameOver) {
+        newState.message = "Game Over! Start a new game with /doom.";
+        return newState;
     }
-    const newLinesCleared = state.linesCleared + lines;
-    const newLevel = Math.floor(newLinesCleared / 10) + 1; // Level up every 10 lines
-    return { ...state, score: state.score + scoreToAdd, linesCleared: newLinesCleared, level: newLevel };
-}
+    if (newState.php <= 0) {
+        newState.gameOver = true;
+        newState.message = "You died! Game Over.";
+        return newState;
+    }
 
-function renderTetrisBoard(state: TetrisGameState): string {
-  const displayBoard = state.currentPiece
-    ? placePieceOnBoard(state.board, state.currentPiece)
-    : state.board;
-
-  let boardStr = "```\n";
-  displayBoard.forEach(row => {
-    boardStr += row.map(cell => EMOJI_MAP[cell] || EMOJI_MAP[EMPTY_CELL]).join("") + "\n";
-  });
-  boardStr += "```\n";
-  boardStr += `Next: ${EMOJI_MAP[state.nextPieceType]} | Score: ${state.score} | Level: ${state.level} | Lines: ${state.linesCleared}`;
-  if (state.gameOver) {
-    boardStr += "\n**GAME OVER!**";
-  }
-  return boardStr;
-}
-
-function handleTetrisAction(state: TetrisGameState, action: string): TetrisGameState {
-  if (state.gameOver || !state.currentPiece) return state;
-
-  let { type, rotation, x, y } = state.currentPiece;
-  let newState = { ...state };
-
-  switch (action) {
-    case "left":
-      if (isValidMove(state.board, type, rotation, x - 1, y)) {
-        newState.currentPiece = { ...state.currentPiece!, x: x - 1 };
-      }
-      break;
-    case "right":
-      if (isValidMove(state.board, type, rotation, x + 1, y)) {
-        newState.currentPiece = { ...state.currentPiece!, x: x + 1 };
-      }
-      break;
-    case "rotate":
-      const newRotation = (rotation + 1) % 4;
-      if (isValidMove(state.board, type, newRotation, x, y)) {
-        newState.currentPiece = { ...state.currentPiece!, rotation: newRotation };
-      }
-      break;
-    case "down": // Soft drop
-      if (isValidMove(state.board, type, rotation, x, y + 1)) {
-        newState.currentPiece = { ...state.currentPiece!, y: y + 1 };
-      } else { // Lock piece
-        newState.board = placePieceOnBoard(state.board, state.currentPiece);
-        const { newBoard, linesCleared } = clearLines(newState.board);
-        newState.board = newBoard;
-        newState = updateScoreAndLevel(newState, linesCleared);
-        newState = spawnNewPiece(newState);
-      }
-      break;
-    case "drop": // Hard drop
-      let tempY = y;
-      while (isValidMove(state.board, type, rotation, x, tempY + 1)) {
-        tempY++;
-      }
-      newState.currentPiece = { ...state.currentPiece!, y: tempY };
-      newState.board = placePieceOnBoard(state.board, newState.currentPiece); // Lock immediately
-      const clResult = clearLines(newState.board);
-      newState.board = clResult.newBoard;
-      newState = updateScoreAndLevel(newState, clResult.linesCleared);
-      newState = spawnNewPiece(newState);
-      break;
-  }
-  return newState;
-}
-
-function getTetrisComponents(gameOver: boolean) { // gameStateJson removed as state is now in embed
-    if (gameOver) return [];
-    return [
-        {
-            type: 1, // Action Row
-            components: [
-                { type: 2, style: 2, label: "⬅️", custom_id: "tetris_left" },
-                { type: 2, style: 2, label: "⬇️", custom_id: "tetris_down" },
-                { type: 2, style: 2, label: "➡️", custom_id: "tetris_right" },
-                { type: 2, style: 2, label: "🔄", custom_id: "tetris_rotate" },
-                { type: 2, style: 1, label: "⏬", custom_id: "tetris_drop" }, // Hard Drop
-            ]
-        }
-    ];
-}
-// --- End Tetris Logic ---
-
-// --- Quote Message Logic ---
-function getQuoteComponents(counts: { up: number; down: number; fire: number; skull: number; }) {
-    return [{
-        type: 1, // Action Row
-        components: [
-            { type: 2, style: 2, label: `👍 ${counts.up}`, custom_id: `quote_up` },
-            { type: 2, style: 2, label: `👎 ${counts.down}`, custom_id: `quote_down` },
-            { type: 2, style: 2, label: `🔥 ${counts.fire}`, custom_id: `quote_fire` },
-            { type: 2, style: 2, label: `💀 ${counts.skull}`, custom_id: `quote_skull` },
-        ]
-    }];
-}
-// --- End Quote Message Logic ---
-
-// --- Maze Game Constants and Logic ---
-const MAZE_VIEW_WIDTH = 28;
-const MAZE_VIEW_HEIGHT = 14;
-const MAZE_MAX_VIEW_DISTANCE = 10;
-
-const MAZE_WALL_N_S_CLOSE = "🟥";
-const MAZE_WALL_N_S_MID = "♦️";
-const MAZE_WALL_E_W_CLOSE = "🟦";
-const MAZE_WALL_E_W_MID = "🔹";
-const MAZE_WALL_FAR = "⬛";
-
-const MAZE_FLOOR_CLOSE = "🟩";
-const MAZE_FLOOR_MID = "🟫";
-const MAZE_FLOOR_FAR = "⬛";
-const MAZE_CEILING = "🌑";
-
-const MAZE_EMPTY = 0;
-const MAZE_WALL = 1;
-const MAZE_EXIT_TILE = 9; // Renamed from MAZE_EXIT to avoid conflict
-
-const initialMazeMapData = [
-  [1,1,1,1,1,1,1,1,1,1,1,1],
-  [1,0,0,0,1,0,0,0,0,0,0,1],
-  [1,0,1,0,1,0,1,1,1,0,1,1],
-  [1,0,1,0,0,0,0,0,1,0,0,1],
-  [1,0,1,1,1,0,1,0,1,1,0,1],
-  [1,0,0,0,1,0,1,0,0,0,'E',1],
-  [1,1,1,0,1,1,1,1,1,1,1,1],
-  [1,0,0,0,0,0,0,0,0,0,0,1],
-  [1,1,1,1,1,1,1,1,1,1,1,1],
-].map(row => row.map(cell => cell === 'E' ? MAZE_EXIT_TILE : cell as number));
-
-interface MazePlayerState {
-  x: number; y: number; angle: number;
-  dirX: number; dirY: number; planeX: number; planeY: number;
-}
-
-interface MazeGameState {
-  map: number[][];
-  player: MazePlayerState;
-  heldKeys: { w: boolean; s: boolean; a: boolean; d: boolean; sprint: boolean };
-  health: number; stamina: number; maxHealth: number; maxStamina: number;
-  sprintCost: number; staminaRegen: number; wallBumpDamage: number; sprintBumpDamage: number;
-  gameOver: boolean; win: boolean; message: string;
-  ownerId: string; allowOthers: boolean;
-}
-
-function initialMazePlayerState(): MazePlayerState {
-  const angle = Math.PI / 4;
-  return {
-    x: 1.5, y: 1.5, angle: angle,
-    dirX: Math.cos(angle), dirY: Math.sin(angle),
-    planeX: Math.cos(angle + Math.PI / 2) * 0.66, planeY: Math.sin(angle + Math.PI / 2) * 0.66,
-  };
-}
-
-function initialMazeState(ownerId: string, allowOthers: boolean): MazeGameState {
-  return {
-    map: JSON.parse(JSON.stringify(initialMazeMapData)),
-    player: initialMazePlayerState(),
-    heldKeys: { w: false, s: false, a: false, d: false, sprint: false },
-    health: 100, stamina: 100, maxHealth: 100, maxStamina: 100,
-    sprintCost: 0.5, staminaRegen: 0.3, wallBumpDamage: 2, sprintBumpDamage: 5,
-    gameOver: false, win: false, message: "Find the exit!",
-    ownerId, allowOthers,
-  };
-}
-
-function renderMazeView(gameState: MazeGameState): string {
-  const { player, map } = gameState;
-  let screenBuffer: string[][] = Array(MAZE_VIEW_HEIGHT).fill(null).map(() => Array(MAZE_VIEW_WIDTH).fill(MAZE_CEILING));
-
-  for (let x = 0; x < MAZE_VIEW_WIDTH; x++) {
-    const cameraX = 2 * x / MAZE_VIEW_WIDTH - 1;
-    const rayDirX = player.dirX + player.planeX * cameraX;
-    const rayDirY = player.dirY + player.planeY * cameraX;
-
-    let mapX = Math.floor(player.x);
-    let mapY = Math.floor(player.y);
-
-    let sideDistX: number, sideDistY: number;
-    const deltaDistX = (rayDirX === 0) ? Infinity : Math.abs(1 / rayDirX);
-    const deltaDistY = (rayDirY === 0) ? Infinity : Math.abs(1 / rayDirY);
-    let perpWallDist: number;
-    let stepX: number, stepY: number;
-    let hit = 0, side: number = 0; // side=0 EW, side=1 NS
-
-    if (rayDirX < 0) { stepX = -1; sideDistX = (player.x - mapX) * deltaDistX; }
-    else { stepX = 1; sideDistX = (mapX + 1.0 - player.x) * deltaDistX; }
-    if (rayDirY < 0) { stepY = -1; sideDistY = (player.y - mapY) * deltaDistY; }
-    else { stepY = 1; sideDistY = (mapY + 1.0 - player.y) * deltaDistY; }
-
-    while (hit === 0) {
-      if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
-      else { sideDistY += deltaDistY; mapY += stepY; side = 1; }
-      
-      if (mapX < 0 || mapX >= map[0].length || mapY < 0 || mapY >= map.length) {
-        perpWallDist = MAZE_MAX_VIEW_DISTANCE; hit = 1; break;
-      }
-      if (map[mapY][mapX] > 0 && map[mapY][mapX] !== MAZE_EXIT_TILE) hit = 1;
-      
-      let tempPerpWallDist;
-      if (side === 0) tempPerpWallDist = (mapX - player.x + (1 - stepX) / 2) / rayDirX;
-      else            tempPerpWallDist = (mapY - player.y + (1 - stepY) / 2) / rayDirY;
-      if (tempPerpWallDist > MAZE_MAX_VIEW_DISTANCE) { hit = 1; perpWallDist = MAZE_MAX_VIEW_DISTANCE; }
+    // Handle action toggles
+    switch (action) {
+        case "toggle_forward": newState.isMovingForward = !newState.isMovingForward; break;
+        case "toggle_turn_left": newState.isTurningLeft = !newState.isTurningLeft; break;
+        case "toggle_turn_right": newState.isTurningRight = !newState.isTurningRight; break;
     }
     
-    if (side === 0) perpWallDist = (mapX - player.x + (1 - stepX) / 2) / rayDirX;
-    else            perpWallDist = (mapY - player.y + (1 - stepY) / 2) / rayDirY;
-    perpWallDist = Math.max(0.1, perpWallDist);
+    // Apply continuous actions (turning)
+    if (newState.isTurningLeft) newState.pa -= PLAYER_ROTATION_SPEED;
+    if (newState.isTurningRight) newState.pa += PLAYER_ROTATION_SPEED;
+    newState.pa = (newState.pa + 2 * Math.PI) % (2 * Math.PI); // Normalize angle
 
-    const lineHeight = Math.floor(MAZE_VIEW_HEIGHT / perpWallDist);
-    let drawStart = -lineHeight / 2 + MAZE_VIEW_HEIGHT / 2; if (drawStart < 0) drawStart = 0;
-    let drawEnd = lineHeight / 2 + MAZE_VIEW_HEIGHT / 2; if (drawEnd >= MAZE_VIEW_HEIGHT) drawEnd = MAZE_VIEW_HEIGHT - 1;
-
-    let wallColor: string;
-    if (perpWallDist >= MAZE_MAX_VIEW_DISTANCE * 0.85) wallColor = MAZE_WALL_FAR;
-    else if (perpWallDist > MAZE_MAX_VIEW_DISTANCE * 0.5) wallColor = (side === 0) ? MAZE_WALL_E_W_MID : MAZE_WALL_N_S_MID;
-    else wallColor = (side === 0) ? MAZE_WALL_E_W_CLOSE : MAZE_WALL_N_S_CLOSE;
-    if (map[mapY]?.[mapX] === MAZE_EXIT_TILE && perpWallDist < 1.5) wallColor = "🌟";
-
-    for (let y = 0; y < MAZE_VIEW_HEIGHT; y++) {
-      if (y < drawStart) screenBuffer[y][x] = MAZE_CEILING;
-      else if (y >= drawStart && y <= drawEnd) screenBuffer[y][x] = wallColor;
-      else {
-        const currentDist = MAZE_VIEW_HEIGHT / (2.0 * y - MAZE_VIEW_HEIGHT);
-        if (currentDist > MAZE_MAX_VIEW_DISTANCE * 0.6) screenBuffer[y][x] = MAZE_FLOOR_FAR;
-        else if (currentDist > MAZE_MAX_VIEW_DISTANCE * 0.3) screenBuffer[y][x] = MAZE_FLOOR_MID;
-        else screenBuffer[y][x] = MAZE_FLOOR_CLOSE;
-      }
+    // Apply continuous actions (movement)
+    if (newState.isMovingForward) {
+        const newX = newState.px + Math.cos(newState.pa) * PLAYER_MOVE_SPEED;
+        const newY = newState.py + Math.sin(newState.pa) * PLAYER_MOVE_SPEED;
+        // Basic collision detection
+        if (!isWall(newX, newState.py)) newState.px = newX;
+        if (!isWall(newState.px, newY)) newState.py = newY;
     }
-  }
-  return "```\n" + screenBuffer.map(row => row.join("")).join("\n") + "\n```";
-}
 
-function updateMazeGame(gameState: MazeGameState): MazeGameState {
-  if (gameState.gameOver || gameState.win) return gameState;
-  const { player, map, heldKeys } = gameState;
-  const moveSpeedBase = 0.06; const rotationSpeed = 0.05;
-  let moveSpeed = moveSpeedBase;
 
-  if (heldKeys.sprint && gameState.stamina > 0 && (heldKeys.w || heldKeys.s)) {
-    moveSpeed *= 1.75; gameState.stamina -= gameState.sprintCost;
-    if (gameState.stamina < 0) gameState.stamina = 0;
-  } else {
-    if (gameState.stamina < gameState.maxStamina) {
-      gameState.stamina += gameState.staminaRegen;
-      if (gameState.stamina > gameState.maxStamina) gameState.stamina = gameState.maxStamina;
+    // Player shoot action
+    if (action === "shoot") {
+        newState.message = "Pew!";
+        let shotHit = false;
+        newState.enemies.forEach(enemy => {
+            if (!enemy.isActive) return;
+            const dx = enemy.x - newState.px;
+            const dy = enemy.y - newState.py;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < SHOOT_RANGE) {
+                const angleToEnemy = Math.atan2(dy, dx);
+                let angleDiff = newState.pa - angleToEnemy;
+                // Normalize angle_diff to be between -pi and pi
+                angleDiff = (angleDiff + Math.PI) % (2 * Math.PI) - Math.PI;
+                if (Math.abs(angleDiff) < FOV / 4) { // Check if enemy is roughly in front
+                    enemy.hp -= SHOOT_DAMAGE;
+                    newState.message = `Hit enemy! (HP: ${enemy.hp})`;
+                    shotHit = true;
+                    if (enemy.hp <= 0) {
+                        enemy.isActive = false;
+                        newState.message = "Enemy eliminated!";
+                    }
+                }
+            }
+        });
+        if (!shotHit) newState.message = "Missed!";
     }
-  }
-  if(heldKeys.sprint && gameState.stamina <=0) heldKeys.sprint = false;
 
-  if (heldKeys.a) {
-    const oldDirX = player.dirX; player.dirX = player.dirX * Math.cos(rotationSpeed) - player.dirY * Math.sin(rotationSpeed);
-    player.dirY = oldDirX * Math.sin(rotationSpeed) + player.dirY * Math.cos(rotationSpeed);
-    const oldPlaneX = player.planeX; player.planeX = player.planeX * Math.cos(rotationSpeed) - player.planeY * Math.sin(rotationSpeed);
-    player.planeY = oldPlaneX * Math.sin(rotationSpeed) + player.planeY * Math.cos(rotationSpeed); player.angle -= rotationSpeed;
-  }
-  if (heldKeys.d) {
-    const oldDirX = player.dirX; player.dirX = player.dirX * Math.cos(-rotationSpeed) - player.dirY * Math.sin(-rotationSpeed);
-    player.dirY = oldDirX * Math.sin(-rotationSpeed) + player.dirY * Math.cos(-rotationSpeed);
-    const oldPlaneX = player.planeX; player.planeX = player.planeX * Math.cos(-rotationSpeed) - player.planeY * Math.sin(-rotationSpeed);
-    player.planeY = oldPlaneX * Math.sin(-rotationSpeed) + player.planeY * Math.cos(-rotationSpeed); player.angle += rotationSpeed;
-  }
+    // Enemy AI (simple: move towards player, basic attack)
+    newState.enemies.forEach(enemy => {
+        if (!enemy.isActive || newState.gameOver) return;
 
-  let newX = player.x, newY = player.y; let moved = false, collided = false;
-  if (heldKeys.w) { newX += player.dirX * moveSpeed; newY += player.dirY * moveSpeed; moved = true; }
-  if (heldKeys.s) { newX -= player.dirX * moveSpeed * 0.7; newY -= player.dirY * moveSpeed * 0.7; moved = true; }
-  
-  const checkRadius = 0.2;
-  const targetMapCellXForXMove = Math.floor(newX + Math.sign(newX - player.x) * checkRadius);
-  if (map[Math.floor(player.y)]?.[targetMapCellXForXMove] > 0 && map[Math.floor(player.y)]?.[targetMapCellXForXMove] !== MAZE_EXIT_TILE) { newX = player.x; collided = true; }
-  else { player.x = newX; }
+        const dx = newState.px - enemy.x;
+        const dy = newState.py - enemy.y;
+        const distToPlayer = Math.sqrt(dx * dx + dy * dy);
 
-  const targetMapCellYForYMove = Math.floor(newY + Math.sign(newY - player.y) * checkRadius);
-  if (map[targetMapCellYForYMove]?.[Math.floor(player.x)] > 0 && map[targetMapCellYForYMove]?.[Math.floor(player.x)] !== MAZE_EXIT_TILE) { newY = player.y; collided = true; } // Use current player.x for this check
-  else { player.y = newY; }
+        if (distToPlayer < 0.5 * TILE_SIZE) { // Close enough to attack
+            newState.php -= 1;
+            newState.message = `Ouch! Enemy hit you! (HP: ${newState.php})`;
+            if (newState.php <= 0) {
+                newState.gameOver = true;
+                newState.message = "You died! Game Over.";
+            }
+        } else if (distToPlayer < 5 * TILE_SIZE) { // Agro range
+            const angleToPlayer = Math.atan2(dy, dx);
+            const moveX = Math.cos(angleToPlayer) * ENEMY_MOVE_SPEED;
+            const moveY = Math.sin(angleToPlayer) * ENEMY_MOVE_SPEED;
 
+            const newEnemyX = enemy.x + moveX;
+            const newEnemyY = enemy.y + moveY;
 
-  if (moved && collided) {
-    gameState.health -= heldKeys.sprint ? gameState.sprintBumpDamage : gameState.wallBumpDamage;
-    gameState.message = heldKeys.sprint ? "Ouch! Ran into a wall!" : "Bump!";
-    if (gameState.health <= 0) { gameState.health = 0; gameState.gameOver = true; gameState.message = "You collapsed..."; }
-  } else if (moved) gameState.message = "";
+            if (!isWall(newEnemyX, enemy.y)) enemy.x = newEnemyX;
+            if (!isWall(enemy.x, newEnemyY)) enemy.y = newEnemyY;
+        }
+    });
 
-  if (map[Math.floor(player.y)]?.[Math.floor(player.x)] === MAZE_EXIT_TILE) {
-    gameState.win = true; gameState.message = "You found the exit!";
-  }
-  return gameState;
+    if (newState.enemies.every(e => !e.isActive) && !newState.gameOver) {
+        newState.message = "All enemies defeated! You WIN!";
+        newState.gameOver = true; // Or advance level
+    }
+
+    return newState;
 }
 
-function getMazeStatsDisplay(gameState: MazeGameState): string {
-  const healthSegments = Math.max(0, Math.ceil(gameState.health / (gameState.maxHealth / 10)));
-  const healthBar = "🟥".repeat(healthSegments) + "▪️".repeat(10 - healthSegments);
-  const staminaSegments = Math.max(0, Math.ceil(gameState.stamina / (gameState.maxStamina / 10)));
-  const staminaBar = "🟦".repeat(staminaSegments) + "▫️".repeat(10 - staminaSegments);
-  let text = `\`\`\`asciidoc\n=Health: [${healthBar}] ${Math.floor(gameState.health)}/${gameState.maxHealth}\n\`\`\`\n`;
-  text += `\`\`\`asciidoc\n=Stamina: [${staminaBar}] ${Math.floor(gameState.stamina)}/${gameState.maxStamina}\n\`\`\``;
-  if (gameState.message) text += `\n*${gameState.message}*`;
-  return text;
+// --- Game Rendering ---
+function renderGameView(state: GameState): string {
+    if (state.gameOver) {
+        return `\`\`\`\n${state.message}\nPlayer HP: ${state.php}\n\`\`\``;
+    }
+
+    const screenBuffer: string[][] = Array(VIEW_HEIGHT_CHARS)
+        .fill(null).map(() => Array(VIEW_WIDTH_CHARS).fill(EMOJI_EMPTY));
+
+    const wallDistances: number[] = Array(VIEW_WIDTH_CHARS).fill(Infinity);
+
+    // Raycasting for walls
+    for (let col = 0; col < VIEW_WIDTH_CHARS; col++) {
+        const rayAngle = state.pa - FOV / 2 + (col / VIEW_WIDTH_CHARS) * FOV;
+        let distToWall = 0;
+        let hitWall = false;
+        
+        const eyeX = Math.cos(rayAngle);
+        const eyeY = Math.sin(rayAngle);
+
+        while (!hitWall && distToWall < MAX_RAY_DEPTH) {
+            distToWall += 0.1; // Step along ray
+            const testX = state.px + eyeX * distToWall;
+            const testY = state.py + eyeY * distToWall;
+
+            if (isWall(testX,testY)) {
+                hitWall = true;
+                // Fish-eye correction
+                const correctedDist = distToWall * Math.cos(rayAngle - state.pa);
+                wallDistances[col] = correctedDist;
+
+                const lineHeight = Math.max(1, Math.floor(VIEW_HEIGHT_CHARS / (correctedDist + 0.001))); // Avoid division by zero
+                const drawStart = Math.max(0, Math.floor((VIEW_HEIGHT_CHARS - lineHeight) / 2));
+                const drawEnd = Math.min(VIEW_HEIGHT_CHARS - 1, Math.floor((VIEW_HEIGHT_CHARS + lineHeight) / 2));
+                
+                for (let row = 0; row < VIEW_HEIGHT_CHARS; row++) {
+                    if (row < drawStart) screenBuffer[row][col] = EMOJI_CEILING;
+                    else if (row >= drawStart && row <= drawEnd) screenBuffer[row][col] = EMOJI_WALL;
+                    else screenBuffer[row][col] = EMOJI_FLOOR;
+                }
+            }
+        }
+         if (!hitWall) { // No wall hit within MAX_RAY_DEPTH, draw sky/floor
+            for (let row = 0; row < VIEW_HEIGHT_CHARS; row++) {
+                if (row < VIEW_HEIGHT_CHARS / 2) screenBuffer[row][col] = EMOJI_CEILING;
+                else screenBuffer[row][col] = EMOJI_FLOOR;
+            }
+        }
+    }
+    
+    // Sprite (Enemy) Rendering (very basic, sort by distance for proper overlap)
+    const sortedEnemies = state.enemies
+        .filter(e => e.isActive)
+        .map(enemy => {
+            const dx = enemy.x - state.px;
+            const dy = enemy.y - state.py;
+            return { ...enemy, dist: dx * dx + dy * dy }; // Store squared distance
+        })
+        .sort((a, b) => b.dist - a.dist); // Furthest first
+
+    sortedEnemies.forEach(enemy => {
+        const dx = enemy.x - state.px;
+        const dy = enemy.y - state.py;
+        const enemyDist = Math.sqrt(enemy.dist);
+
+        // Transform enemy position to player's view space
+        const relativeX = dx * Math.cos(-state.pa) - dy * Math.sin(-state.pa);
+        const relativeY = dx * Math.sin(-state.pa) + dy * Math.cos(-state.pa); // This is depth
+
+        if (relativeY > 0.5 && enemyDist < MAX_RAY_DEPTH) { // Enemy is in front and within range
+            const enemyAngleRelativeToPlayer = Math.atan2(relativeX, relativeY); // Angle from player's forward vector
+
+            if (Math.abs(enemyAngleRelativeToPlayer) < FOV / 2) { // Enemy is within FOV
+                const enemyScreenX = Math.floor(VIEW_WIDTH_CHARS / 2 + (enemyAngleRelativeToPlayer / (FOV/2)) * (VIEW_WIDTH_CHARS / 2));
+                
+                if (enemyScreenX >= 0 && enemyScreenX < VIEW_WIDTH_CHARS && enemyDist < wallDistances[enemyScreenX]) {
+                    const enemySize = Math.max(1, Math.floor(VIEW_HEIGHT_CHARS / (enemyDist + 0.001)));
+                    const drawStartY = Math.max(0, Math.floor((VIEW_HEIGHT_CHARS - enemySize) / 2));
+                    const drawEndY = Math.min(VIEW_HEIGHT_CHARS - 1, drawStartY + enemySize -1);
+
+                    const enemyEmoji = enemy.hp > 0 ? EMOJI_ENEMY_ALIVE : EMOJI_ENEMY_DEAD;
+                    for (let y = drawStartY; y <= drawEndY; y++) {
+                         // A bit of horizontal spread for the sprite
+                        for (let x_offset = -Math.floor(enemySize/4); x_offset <= Math.floor(enemySize/4); x_offset++) {
+                            const currentScreenX = enemyScreenX + x_offset;
+                            if (currentScreenX >= 0 && currentScreenX < VIEW_WIDTH_CHARS && enemyDist < wallDistances[currentScreenX]) {
+                                screenBuffer[y][currentScreenX] = enemyEmoji;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+
+    // Add bullet trace if player just shot (visual feedback, very simple)
+    if (state.message.startsWith("Pew!") || state.message.startsWith("Hit enemy!") || state.message.startsWith("Missed!")) {
+        const midY = Math.floor(VIEW_HEIGHT_CHARS / 2);
+        const midX = Math.floor(VIEW_WIDTH_CHARS / 2);
+        if (screenBuffer[midY] && screenBuffer[midY][midX] !== EMOJI_WALL) { // Don't draw over wall
+             screenBuffer[midY][midX] = EMOJI_BULLET_TRACE;
+        }
+    }
+
+
+    // Assemble screenBuffer into string
+    let viewString = screenBuffer.map(row => row.join("")).join("\n");
+    
+    const healthBar = `HP: ${"❤️".repeat(Math.max(0, state.php))}${"🖤".repeat(Math.max(0, PLAYER_MAX_HEALTH - state.php))}`;
+    const enemyCount = state.enemies.filter(e => e.isActive).length;
+    const statusLine = `${healthBar} | Enemies: ${enemyCount}`;
+    const movementStatus = 
+        `Fwd:${state.isMovingForward ? "ON" : "OFF"} ` +
+        `Lt:${state.isTurningLeft ? "ON" : "OFF"} ` +
+        `Rt:${state.isTurningRight ? "ON" : "OFF"}`;
+
+    return `\`\`\`\n${viewString}\n\`\`\`\n${statusLine}\n${movementStatus}\n${state.message}`;
 }
 
-function getMazeComponents(gameOver: boolean, win: boolean, heldKeys: MazeGameState['heldKeys']) {
-  if (gameOver || win) return [{ type: 1, components: [{ type: 2, style: 1, label: "New Game", custom_id: "maze_restart" }] }];
-  return [
-    { type: 1, components: [
-        { type: 2, style: heldKeys.w ? 3 : 2, label: "⬆️ W (Fwd)", custom_id: "maze_w_toggle" },
-        { type: 2, style: heldKeys.sprint ? 3 : 2, label: "💨 Sprint", custom_id: "maze_sprint_toggle" },
-    ]},
-    { type: 1, components: [
-        { type: 2, style: heldKeys.a ? 3 : 2, label: "⬅️ A (L)", custom_id: "maze_a_toggle" },
-        { type: 2, style: heldKeys.s ? 3 : 2, label: "⬇️ S (Bwd)", custom_id: "maze_s_toggle" },
-        { type: 2, style: heldKeys.d ? 3 : 2, label: "➡️ D (R)", custom_id: "maze_d_toggle" },
-    ]}
-  ];
-}
-// --- End Maze Game Logic ---
-
-
-// --- Main Server Logic ---
+// --- Discord Interaction Handler ---
 Deno.serve(async (req: Request) => {
-  if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
-  }
+    if (req.method !== "POST") {
+        return new Response("Method Not Allowed", { status: 405 });
+    }
 
-  const signature = req.headers.get("x-signature-ed25519");
-  const timestamp = req.headers.get("x-signature-timestamp");
-  const body = await req.text();
+    const signature = req.headers.get("x-signature-ed25519");
+    const timestamp = req.headers.get("x-signature-timestamp");
+    const body = await req.text();
 
-  if (!signature || !timestamp) {
-    return new Response("Bad Request: Missing Signature Headers", { status: 400 });
-  }
+    if (!signature || !timestamp) {
+        return new Response("Bad Request: Missing Signature Headers", { status: 400 });
+    }
 
-  const isVerified = nacl.sign.detached.verify(
-    new TextEncoder().encode(timestamp + body),
-    hexToUint8Array(signature),
-    hexToUint8Array(DISCORD_PUBLIC_KEY)
-  );
+    const isVerified = nacl.sign.detached.verify(
+        new TextEncoder().encode(timestamp + body),
+        hexToUint8Array(signature),
+        hexToUint8Array(DISCORD_PUBLIC_KEY)
+    );
 
-  if (!isVerified) {
-    return new Response("Unauthorized: Invalid Discord Signature", { status: 401 });
-  }
+    if (!isVerified) {
+        return new Response("Unauthorized: Invalid Discord Signature", { status: 401 });
+    }
 
-  const interaction = JSON.parse(body);
+    const interaction = JSON.parse(body);
 
-  switch (interaction.type) {
-    case 1: // PING
-      return new Response(JSON.stringify({ type: 1 }), { // PONG
-        headers: { "Content-Type": "application/json" },
-      });
-    case 2: // APPLICATION_COMMAND
-      {
-        const commandName = interaction.data.name;
-        const userId = interaction.member.user.id;
-        const options = interaction.data.options;
+    try { // Wrap main logic in try-catch for robustness
+        switch (interaction.type) {
+            case 1: // PING
+                return new Response(JSON.stringify({ type: 1 }), {
+                    headers: { "Content-Type": "application/json" },
+                });
+            case 2: // APPLICATION_COMMAND
+                {
+                    const commandName = interaction.data.name;
+                    if (commandName === "ping") {
+                        return new Response(
+                            JSON.stringify({ type: 4, data: { content: "Pong!" } }),
+                            { headers: { "Content-Type": "application/json" } }
+                        );
+                    } else if (commandName === "doom") {
+                        const initialGameState = getInitialGameState();
+                        const gameStateString = serializeGameState(initialGameState);
+                        const gameView = renderGameView(initialGameState);
 
-        if (commandName === "ping") {
-          return new Response(
-            JSON.stringify({ type: 4, data: { content: "Pong!" } }),
-            { headers: { "Content-Type": "application/json" } }
-          );
-        } else if (commandName === "Quote Message" && interaction.data.type === 3) {
-            const targetMessageId = interaction.data.target_id;
-            const messageData = interaction.data.resolved.messages[targetMessageId];
-            const author = messageData.author;
-            const displayName = author.global_name || author.username;
-            const msgTimestamp = new Date(messageData.timestamp);
-            const year = msgTimestamp.getFullYear();
-            const embed = {
-                color: 0x7289DA, description: messageData.content || "*No text content.*",
-                author: { name: `${displayName}`, icon_url: author.avatar ? `https://cdn.discordapp.com/avatars/${author.id}/${author.avatar}.png` : `https://cdn.discordapp.com/embed/avatars/${parseInt(author.discriminator) % 5}.png` },
-                footer: { text: `- ${displayName}, ${year}` }, timestamp: messageData.timestamp,
-            };
-            if (messageData.attachments?.[0]?.content_type?.startsWith("image/")) {
-                (embed as any).image = { url: messageData.attachments[0].url };
-            }
-            const initialCounts = { up: 0, down: 0, fire: 0, skull: 0 };
-            return new Response(JSON.stringify({ type: 4, data: { embeds: [embed], components: getQuoteComponents(initialCounts) }}), { headers: { "Content-Type": "application/json" } });
-        } else if (commandName === "tetris") {
-            const allowOthers = options?.find((opt:any) => opt.name === "allow_others_to_control")?.value || false;
-            const initialGameStateObj = initialTetrisState(userId, allowOthers);
-            const gameStateJson = JSON.stringify(initialGameStateObj);
-            return new Response(JSON.stringify({ type: 4, data: {
-                content: renderTetrisBoard(initialGameStateObj),
-                components: getTetrisComponents(initialGameStateObj.gameOver),
-                embeds: [{ footer: { text: `TETRIS_STATE:${gameStateJson}` } }] // Store state
-            }}), { headers: { "Content-Type": "application/json" } });
-        } else if (commandName === "horrormaze") {
-            const allowOthers = options?.find((opt:any) => opt.name === "allow_others_to_control")?.value || false;
-            const initialGameState = initialMazeState(userId, allowOthers);
-            const gameStateJson = JSON.stringify(initialGameState);
-            const view = renderMazeView(initialGameState);
-            const stats = getMazeStatsDisplay(initialGameState);
-            return new Response(JSON.stringify({ type: 4, data: {
-                content: view + "\n" + stats,
-                components: getMazeComponents(initialGameState.gameOver, initialGameState.win, initialGameState.heldKeys),
-                embeds: [{ footer: { text: `MAZE_STATE:${gameStateJson}` } }]
-            }}), { headers: { "Content-Type": "application/json" } });
-        } else {
-          return new Response(JSON.stringify({ type: 4, data: { content: "Unknown command." } }), { headers: { "Content-Type": "application/json" } });
+                        return new Response(
+                            JSON.stringify({
+                                type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
+                                data: {
+                                    content: gameView,
+                                    components: [
+                                        {
+                                            type: 1, // Action Row
+                                            components: [
+                                                { type: 2, style: 2, label: "Toggle Fwd", custom_id: `doom_toggle_forward_${gameStateString}` }, // Grey
+                                                { type: 2, style: 1, label: "Shoot", custom_id: `doom_shoot_${gameStateString}` }, // Blue
+                                            ],
+                                        },
+                                        {
+                                            type: 1, // Action Row
+                                            components: [
+                                                { type: 2, style: 2, label: "Toggle Turn L", custom_id: `doom_toggle_turn_left_${gameStateString}` },
+                                                { type: 2, style: 2, label: "Toggle Turn R", custom_id: `doom_toggle_turn_right_${gameStateString}` },
+                                            ],
+                                        }
+                                    ],
+                                },
+                            }),
+                            { headers: { "Content-Type": "application/json" } }
+                        );
+                    } else {
+                        return new Response(
+                            JSON.stringify({ type: 4, data: { content: "Unknown command." } }),
+                            { headers: { "Content-Type": "application/json" } }
+                        );
+                    }
+                }
+            case 3: // MESSAGE_COMPONENT (Button press)
+                {
+                    const customIdFull = interaction.data.custom_id;
+                    const [prefix, action, ...gameStateParts] = customIdFull.split("_");
+                    const gameStateString = gameStateParts.join("_");
+
+
+                    if (prefix !== "doom" || !action || !gameStateString) {
+                         console.error("Invalid custom_id format:", customIdFull);
+                         return new Response(JSON.stringify({ type: 4, data: { content: "Error: Invalid button data.", ephemeral: true } }), 
+                                            { headers: { "Content-Type": "application/json" } });
+                    }
+
+                    const currentGameState = deserializeGameState(gameStateString);
+                    if (!currentGameState) {
+                        console.error("Failed to deserialize game state from custom_id:", gameStateString);
+                         return new Response(JSON.stringify({ type: 4, data: { content: "Error: Corrupted game state. Please start a new game with /doom.", ephemeral: true } }), 
+                                            { headers: { "Content-Type": "application/json" } });
+                    }
+                    
+                    if (Date.now() - currentGameState.lastInteractionTime > 600000 && !currentGameState.gameOver) { // 10 min, example
+                        return new Response(
+                            JSON.stringify({
+                                type: 7, // UPDATE_MESSAGE
+                                data: {
+                                    content: "This game session has expired due to inactivity. Please start a new game with `/doom`.",
+                                    components: [] // Remove buttons
+                                }
+                            }), { headers: { "Content-Type": "application/json" } }
+                        );
+                    }
+
+
+                    const updatedGameState = updateGameState(currentGameState, action);
+                    const newGameStateString = serializeGameState(updatedGameState);
+
+                    if (newGameStateString.length > 90) { // Check if custom_id will be too long (90 + "doom_action_" ~ 100)
+                        console.warn("Serialized game state is very long:", newGameStateString.length, newGameStateString);
+                        // Potentially respond with an error or simplified state if it gets too big
+                    }
+
+
+                    const gameView = renderGameView(updatedGameState);
+                    
+                    return new Response(
+                        JSON.stringify({
+                            type: 7, // UPDATE_MESSAGE
+                            data: {
+                                content: gameView,
+                                components: updatedGameState.gameOver ? [] : [ // No buttons if game over
+                                    {
+                                        type: 1, components: [
+                                            { type: 2, style: updatedGameState.isMovingForward ? 3:2, label: "Toggle Fwd", custom_id: `doom_toggle_forward_${newGameStateString}` }, // Green if ON
+                                            { type: 2, style: 1, label: "Shoot", custom_id: `doom_shoot_${newGameStateString}` },
+                                        ]
+                                    },
+                                    {
+                                        type: 1, components: [
+                                            { type: 2, style: updatedGameState.isTurningLeft ? 3:2, label: "Toggle Turn L", custom_id: `doom_toggle_turn_left_${newGameStateString}` },
+                                            { type: 2, style: updatedGameState.isTurningRight ? 3:2, label: "Toggle Turn R", custom_id: `doom_toggle_turn_right_${newGameStateString}` },
+                                        ]
+                                    }
+                                ],
+                            },
+                        }),
+                        { headers: { "Content-Type": "application/json" } }
+                    );
+                }
+            default:
+                return new Response("Bad Request: Unknown Interaction Type", { status: 400 });
         }
-      }
-    case 3: // MESSAGE_COMPONENT
-      {
-        const customId = interaction.data.custom_id;
-        const actingUserId = interaction.member.user.id;
-
-        if (customId.startsWith("quote_")) {
-            const action = customId.split("_")[1];
-            let counts = { up: 0, down: 0, fire: 0, skull: 0 };
-            interaction.message.components[0].components.forEach((button: any) => {
-                const count = parseInt(button.label.split(" ").pop()) || 0;
-                if (button.custom_id === "quote_up") counts.up = count;
-                else if (button.custom_id === "quote_down") counts.down = count;
-                else if (button.custom_id === "quote_fire") counts.fire = count;
-                else if (button.custom_id === "quote_skull") counts.skull = count;
-            });
-            if (action === "up") counts.up++; else if (action === "down") counts.down++;
-            else if (action === "fire") counts.fire++; else if (action === "skull") counts.skull++;
-            return new Response(JSON.stringify({ type: 7, data: { embeds: interaction.message.embeds, components: getQuoteComponents(counts) }}), { headers: { "Content-Type": "application/json" } });
-        } else if (customId.startsWith("tetris_")) {
-            const oldEmbedFooter = interaction.message.embeds?.[0]?.footer?.text;
-            if (!oldEmbedFooter || !oldEmbedFooter.startsWith("TETRIS_STATE:")) return new Response(JSON.stringify({ type: 4, data: { content: "Error: Missing Tetris game state.", flags: 64 } }), { headers: { "Content-Type": "application/json" } });
-            const gameStateJson = oldEmbedFooter.substring("TETRIS_STATE:".length);
-            let gameState: TetrisGameState;
-            try { gameState = JSON.parse(gameStateJson); }
-            catch (e) { return new Response(JSON.stringify({ type: 4, data: { content: "Error: Corrupted Tetris game state.", flags: 64 } }), { headers: { "Content-Type": "application/json" } }); }
-
-            if (actingUserId !== gameState.ownerId && !gameState.allowOthers) return new Response(JSON.stringify({ type: 4, data: { content: "Not your Tetris game!", flags: 64 } }), { headers: { "Content-Type": "application/json" } });
-            if (gameState.gameOver) return new Response(JSON.stringify({ type: 7, data: { content: renderTetrisBoard(gameState), components: [], embeds: interaction.message.embeds } }), { headers: { "Content-Type": "application/json" } });
-            
-            const action = customId.substring("tetris_".length);
-            const updatedGameState = handleTetrisAction(gameState, action);
-            const updatedGameStateJson = JSON.stringify(updatedGameState);
-            return new Response(JSON.stringify({ type: 7, data: {
-                content: renderTetrisBoard(updatedGameState),
-                components: getTetrisComponents(updatedGameState.gameOver),
-                embeds: [{ footer: { text: `TETRIS_STATE:${updatedGameStateJson}` } }]
-            }}), { headers: { "Content-Type": "application/json" } });
-        } else if (customId.startsWith("maze_")) {
-            const oldEmbedFooter = interaction.message.embeds?.[0]?.footer?.text;
-            if (!oldEmbedFooter || !oldEmbedFooter.startsWith("MAZE_STATE:")) return new Response(JSON.stringify({ type: 4, data: { content: "Error: Missing Maze game state.", flags: 64 } }), { headers: { "Content-Type": "application/json" } });
-            const gameStateJson = oldEmbedFooter.substring("MAZE_STATE:".length);
-            let gameState: MazeGameState;
-            try { gameState = JSON.parse(gameStateJson); }
-            catch (e) { return new Response(JSON.stringify({ type: 4, data: { content: "Error: Corrupted Maze game state.", flags: 64 } }), { headers: { "Content-Type": "application/json" } }); }
-
-            if (actingUserId !== gameState.ownerId && !gameState.allowOthers) return new Response(JSON.stringify({ type: 4, data: { content: "Not your Maze game!", flags: 64 } }), { headers: { "Content-Type": "application/json" } });
-            
-            const action = customId.substring("maze_".length);
-            if (action === "restart") gameState = initialMazeState(gameState.ownerId, gameState.allowOthers);
-            else if (action.endsWith("_toggle")) {
-                const key = action.split("_")[0] as keyof MazeGameState['heldKeys'];
-                if (gameState.heldKeys.hasOwnProperty(key)) (gameState.heldKeys[key] as boolean) = !(gameState.heldKeys[key] as boolean);
-            }
-            if (!gameState.gameOver && !gameState.win) gameState = updateMazeGame(gameState);
-
-            const newGameStateJson = JSON.stringify(gameState);
-            const view = renderMazeView(gameState);
-            const stats = getMazeStatsDisplay(gameState);
-            return new Response(JSON.stringify({ type: 7, data: {
-                content: view + "\n" + stats,
-                components: getMazeComponents(gameState.gameOver, gameState.win, gameState.heldKeys),
-                embeds: [{ footer: { text: `MAZE_STATE:${newGameStateJson}` } }]
-            }}), { headers: { "Content-Type": "application/json" } });
+    } catch (e) {
+        console.error("Error processing interaction:", e);
+        // Generic error response for the interaction
+        // Check if it's an ApplicationCommand or MessageComponent to determine if ephemeral is possible/appropriate
+        let responseData = { content: "An unexpected error occurred. Please try again." };
+        // if (interaction.type === 2 || interaction.type === 3) { // Add ephemeral if possible
+        //    responseData.flags = 64; // EPHEMERAL
+        // }
+        // Discord might auto-respond if function crashes. If not, this is a fallback.
+        // Best effort to send an ephemeral message for known interaction types that support it.
+        if (interaction.type === 2 || interaction.type === 3) {
+             return new Response(JSON.stringify({ type: 4, data: { content: "An error occurred processing your request.", flags: 64 } }), 
+                                { status: 200, headers: { "Content-Type": "application/json" } }); // Must be 200 OK for Discord to show it
         }
-        return new Response("Bad Request: Unknown Component Interaction", { status: 400 });
-      }
-    default:
-      return new Response("Bad Request: Unknown Interaction Type", { status: 400 });
-  }
+        return new Response("Internal Server Error", { status: 500 });
+    }
 });
-
-console.log("Discord bot server running with Ping, Quote, Tetris, and Horror Maze...");
