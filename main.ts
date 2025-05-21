@@ -1,13 +1,17 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-import { Image, Font } from "https://deno.land/x/imagescript@1.2.17/mod.ts"; // decode removed as Font.render is used
+// Use the default export from imagescript
+import ImageScript from "https://deno.land/x/imagescript@1.2.17/mod.ts";
+
+// Now, Image and Font will be accessed via ImageScript.Image and ImageScript.Font
+const { Image, Font } = ImageScript; // Destructure for convenience if preferred, or use ImageScript.Image directly
 
 // --- Font Initialization ---
 const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf";
 const ITALIC_FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Italic.ttf";
 
-let mainFont: Font | null = null;
-let italicFont: Font | null = null;
+let mainFont: ImageScript.Font | null = null; // Type is now ImageScript.Font
+let italicFont: ImageScript.Font | null = null; // Type is now ImageScript.Font
 let fontInitializationError: string | null = null;
 
 // Top-level await for font initialization.
@@ -19,7 +23,7 @@ let fontInitializationError: string | null = null;
             throw new Error(`Failed to fetch main font: ${mainFontResponse.status} ${mainFontResponse.statusText}`);
         }
         const mainFontData = await mainFontResponse.arrayBuffer();
-        mainFont = Font.render(new Uint8Array(mainFontData)); // Correct way to load font
+        mainFont = ImageScript.Font.render(new Uint8Array(mainFontData)); // Use ImageScript.Font.render
         console.log("Main font rendered successfully!");
 
         console.log(`Attempting to fetch italic font data from ${ITALIC_FONT_URL}...`);
@@ -28,7 +32,7 @@ let fontInitializationError: string | null = null;
             throw new Error(`Failed to fetch italic font: ${italicFontResponse.status} ${italicFontResponse.statusText}`);
         }
         const italicFontData = await italicFontResponse.arrayBuffer();
-        italicFont = Font.render(new Uint8Array(italicFontData)); // Correct way to load font
+        italicFont = ImageScript.Font.render(new Uint8Array(italicFontData)); // Use ImageScript.Font.render
         console.log("Italic font rendered successfully!");
 
     } catch (e) {
@@ -53,13 +57,12 @@ async function generateSimpleQuoteImage(
     messageContent: string
 ): Promise<Uint8Array> {
     if (!mainFont || !italicFont) {
-        // This error will be caught by the command handler and reported to the user.
         throw new Error(`Image generation called but font(s) not initialized. Error: ${fontInitializationError || "Unknown font initialization error."}`);
     }
 
-    const bgColor = 0x36393FFF; // Discord dark theme background (RGBA)
-    const textColor = 0xDCDDDEFF; // Discord light text for content
-    const authorColor = 0xB9BBBEFF; // Discord slightly dimmer text for author
+    const bgColor = 0x36393FFF;
+    const textColor = 0xDCDDDEFF;
+    const authorColor = 0xB9BBBEFF;
 
     const padding = 30;
     const contentFontSize = 28;
@@ -101,30 +104,26 @@ async function generateSimpleQuoteImage(
         if (lineWidth > requiredWidth) requiredWidth = lineWidth;
     });
     if (authorTextWidth > requiredWidth) requiredWidth = authorTextWidth;
-    // Ensure canvas has some width even for very short text, and respects maxTextWidth for overall content block
     const canvasWidth = Math.ceil(Math.max(padding * 2 + 50, Math.min(maxTextWidth + 2 * padding, requiredWidth + 2 * padding)));
 
-
-    const image = new Image(canvasWidth, canvasHeight);
+    const image = new ImageScript.Image(canvasWidth, canvasHeight); // Use ImageScript.Image constructor
     image.fill(bgColor);
 
     let yPos = padding;
 
     for (const line of quoteLines) {
-        // Center each line of the quote
         const textX = (canvasWidth - mainFont.measureWidth(line, contentFontSize)) / 2;
-        image.print(mainFont, Math.max(padding, textX), yPos, line, contentFontSize, textColor); // Ensure textX doesn't go into padding
+        image.print(mainFont, Math.max(padding, textX), yPos, line, contentFontSize, textColor);
         yPos += contentLineHeight;
     }
 
     if (authorLineText) {
-        yPos += padding / 3; // Adjust spacing
-        // Right-align the author line, respecting padding
+        yPos += padding / 3;
         const authorX = Math.max(padding, canvasWidth - authorTextWidth - padding);
         image.print(italicFont, authorX, yPos, authorLineText, authorFontSize, authorColor);
     }
 
-    const pngData: Uint8Array = await image.encode(0); // 0 for PNG
+    const pngData: Uint8Array = await image.encode(0);
     return pngData;
 }
 
@@ -195,7 +194,7 @@ Deno.serve(async (req: Request) => {
                 const messageContent = message.content || "[This message has no text content]";
 
                 try {
-                    console.log(`Generating quote using imagescript for: "${messageContent}" by ${displayName}`);
+                    console.log(`Generating quote using imagescript (default import) for: "${messageContent}" by ${displayName}`);
                     const imageBytes = await generateSimpleQuoteImage(
                         displayName,
                         messageContent
@@ -217,11 +216,11 @@ Deno.serve(async (req: Request) => {
                     );
                     formData.append("files[0]", new Blob([imageBytes], { type: "image/png" }), "quote.png");
                     
-                    console.log("Sending image response (imagescript) for quote.");
+                    console.log("Sending image response (imagescript, default import) for quote.");
                     return new Response(formData);
 
                 } catch (error) {
-                    console.error("Error during quote image generation (imagescript) or sending:", error);
+                    console.error("Error during quote image generation (imagescript, default import) or sending:", error);
                     return new Response(
                         JSON.stringify({ type: 4, data: { content: `Sorry, I couldn't generate the quote image. Error: ${error.message}` } }),
                         { headers: { "Content-Type": "application/json" } }
