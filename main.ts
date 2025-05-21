@@ -1,12 +1,10 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-import { Image, decode, Font } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
+import { Image, Font } from "https://deno.land/x/imagescript@1.2.17/mod.ts"; // decode removed as Font.render is used
 
 // --- Font Initialization ---
-// We'll use Noto Sans, a common and good-looking open-source font.
-// We fetch it once when the Deno Deploy instance starts.
 const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf";
-const ITALIC_FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Italic.ttf"; // For the author
+const ITALIC_FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Italic.ttf";
 
 let mainFont: Font | null = null;
 let italicFont: Font | null = null;
@@ -15,15 +13,23 @@ let fontInitializationError: string | null = null;
 // Top-level await for font initialization.
 (async () => {
     try {
-        console.log(`Attempting to fetch and decode font from ${FONT_URL}...`);
-        const fontData = await fetch(FONT_URL).then(res => res.arrayBuffer());
-        mainFont = decode(fontData) as Font; // Cast to Font
-        console.log("Main font decoded successfully!");
+        console.log(`Attempting to fetch main font data from ${FONT_URL}...`);
+        const mainFontResponse = await fetch(FONT_URL);
+        if (!mainFontResponse.ok) {
+            throw new Error(`Failed to fetch main font: ${mainFontResponse.status} ${mainFontResponse.statusText}`);
+        }
+        const mainFontData = await mainFontResponse.arrayBuffer();
+        mainFont = Font.render(new Uint8Array(mainFontData)); // Correct way to load font
+        console.log("Main font rendered successfully!");
 
-        console.log(`Attempting to fetch and decode italic font from ${ITALIC_FONT_URL}...`);
-        const italicFontData = await fetch(ITALIC_FONT_URL).then(res => res.arrayBuffer());
-        italicFont = decode(italicFontData) as Font;
-        console.log("Italic font decoded successfully!");
+        console.log(`Attempting to fetch italic font data from ${ITALIC_FONT_URL}...`);
+        const italicFontResponse = await fetch(ITALIC_FONT_URL);
+        if (!italicFontResponse.ok) {
+            throw new Error(`Failed to fetch italic font: ${italicFontResponse.status} ${italicFontResponse.statusText}`);
+        }
+        const italicFontData = await italicFontResponse.arrayBuffer();
+        italicFont = Font.render(new Uint8Array(italicFontData)); // Correct way to load font
+        console.log("Italic font rendered successfully!");
 
     } catch (e) {
         console.error("CRITICAL: Failed to initialize font(s) on startup:", e);
@@ -47,6 +53,7 @@ async function generateSimpleQuoteImage(
     messageContent: string
 ): Promise<Uint8Array> {
     if (!mainFont || !italicFont) {
+        // This error will be caught by the command handler and reported to the user.
         throw new Error(`Image generation called but font(s) not initialized. Error: ${fontInitializationError || "Unknown font initialization error."}`);
     }
 
@@ -54,18 +61,15 @@ async function generateSimpleQuoteImage(
     const textColor = 0xDCDDDEFF; // Discord light text for content
     const authorColor = 0xB9BBBEFF; // Discord slightly dimmer text for author
 
-    const padding = 30; // Increased padding
-    const contentFontSize = 28; // Increased for better readability
-    const authorFontSize = 22;  // Increased for better readability
-    const maxTextWidth = 600; // Max width for the text content itself
-    const lineSpacingFactor = 1.4; // Multiplier for line height
+    const padding = 30;
+    const contentFontSize = 28;
+    const authorFontSize = 22;
+    const maxTextWidth = 600;
+    const lineSpacingFactor = 1.4;
 
-    // 1. Format quote and author text
-    const fullQuoteText = `“${messageContent}”`; // Using better quote marks
+    const fullQuoteText = `“${messageContent}”`;
     const authorLineText = `— ${authorDisplayName}`;
 
-    // 2. Calculate wrapped lines for the quote content
-    // imagescript's measureText needs the font size.
     const quoteLines: string[] = [];
     let currentLine = '';
     const words = fullQuoteText.split(' ');
@@ -80,16 +84,14 @@ async function generateSimpleQuoteImage(
             currentLine = testLine;
         }
     }
-    if (currentLine) quoteLines.push(currentLine); // Add the last line
+    if (currentLine) quoteLines.push(currentLine);
 
     const contentLineHeight = contentFontSize * lineSpacingFactor;
     const quoteTextHeight = quoteLines.length * contentLineHeight;
 
-    // 3. Calculate author text dimensions
     const authorTextWidth = italicFont.measureWidth(authorLineText, authorFontSize);
     const authorLineHeight = authorFontSize * lineSpacingFactor;
 
-    // 4. Calculate total canvas dimensions
     const totalTextHeight = quoteTextHeight + (authorLineText ? (authorLineHeight + padding / 2) : 0);
     const canvasHeight = Math.ceil(totalTextHeight + 2 * padding);
 
@@ -99,30 +101,30 @@ async function generateSimpleQuoteImage(
         if (lineWidth > requiredWidth) requiredWidth = lineWidth;
     });
     if (authorTextWidth > requiredWidth) requiredWidth = authorTextWidth;
-    const canvasWidth = Math.ceil(Math.min(maxTextWidth + padding, requiredWidth) + 2 * padding); // Ensure some padding even if text is narrow
+    // Ensure canvas has some width even for very short text, and respects maxTextWidth for overall content block
+    const canvasWidth = Math.ceil(Math.max(padding * 2 + 50, Math.min(maxTextWidth + 2 * padding, requiredWidth + 2 * padding)));
 
-    // 5. Create image and draw
+
     const image = new Image(canvasWidth, canvasHeight);
     image.fill(bgColor);
 
     let yPos = padding;
 
-    // Draw Quote Content
     for (const line of quoteLines) {
-        const textX = (canvasWidth - mainFont.measureWidth(line, contentFontSize)) / 2; // Center each line
-        image.print(mainFont, textX, yPos, line, contentFontSize, textColor);
+        // Center each line of the quote
+        const textX = (canvasWidth - mainFont.measureWidth(line, contentFontSize)) / 2;
+        image.print(mainFont, Math.max(padding, textX), yPos, line, contentFontSize, textColor); // Ensure textX doesn't go into padding
         yPos += contentLineHeight;
     }
 
-    // Draw Author
     if (authorLineText) {
-        yPos += padding / 4; // Smaller space before author line
-        const authorX = canvasWidth - authorTextWidth - padding; // Align author to the right
+        yPos += padding / 3; // Adjust spacing
+        // Right-align the author line, respecting padding
+        const authorX = Math.max(padding, canvasWidth - authorTextWidth - padding);
         image.print(italicFont, authorX, yPos, authorLineText, authorFontSize, authorColor);
     }
 
-    // 6. Encode to PNG
-    const pngData: Uint8Array = await image.encode(0); // 0 for PNG, compression level default
+    const pngData: Uint8Array = await image.encode(0); // 0 for PNG
     return pngData;
 }
 
