@@ -1,27 +1,6 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-// Ensure this resvg_wasm version and URL are correct and accessible for your Deno Deploy environment.
-// Using v0.2.0 as per previous discussions. Adjust if needed.
-import initRsvg, { Resvg } from "https://deno.land/x/resvg_wasm@v0.2.0/mod.js";
-
-const rsvgWasmUrl = new URL("https://deno.land/x/resvg_wasm@v0.2.0/resvg_wasm_bg.wasm");
-let rsvgInitialized = false;
-async function initializeRsvg() {
-    if (rsvgInitialized) return;
-    try {
-        const wasmResponse = await fetch(rsvgWasmUrl);
-        if (!wasmResponse.ok) {
-            throw new Error(`Failed to fetch resvg WASM (${rsvgWasmUrl}): ${wasmResponse.status} ${await wasmResponse.text()}`);
-        }
-        const wasmBinary = await wasmResponse.arrayBuffer();
-        await initRsvg(wasmBinary);
-        rsvgInitialized = true;
-        console.log("resvg-wasm initialized successfully.");
-    } catch (e) {
-        console.error("Error initializing resvg-wasm:", e);
-        throw e;
-    }
-}
+import { Canvas, Image } from "https://deno.land/x/skia_canvas@0.5.5/mod.ts"; // Using skia_canvas for image generation
 
 function hexToUint8Array(hex: string): Uint8Array {
     return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
@@ -32,185 +11,139 @@ if (!DISCORD_PUBLIC_KEY) {
     throw new Error("DISCORD_PUBLIC_KEY is not set.");
 }
 
-// Helper to escape XML special characters for SVG text
-function escapeXml(unsafe: string): string {
-    return unsafe.replace(/[<>&'"]/g, (c) => {
-        switch (c) {
-            case '<': return '<';
-            case '>': return '>';
-            case '&': return '&';
-            case '\'': return '''; // THIS LINE MUST BE EXACTLY THIS
-            case '"': return '"';
-            default: return c;
-        }
-    });
-}
+async function generateQuoteImage(
+    authorName: string,
+    avatarUrl: string,
+    messageContent: string,
+    messageTimestamp: string
+): Promise<Uint8Array> {
+    const pfpSize = 128;
+    const padding = 20;
+    const textPadding = 15;
+    const authorNameFontSize = 24;
+    const contentFontSize = 18;
+    const timestampFontSize = 14;
+    const textBlockWidth = 400;
+    const imageQuality = 0.85; // For JPEG, not used for PNG but good to keep in mind for alternatives
 
-// Helper function for text wrapping (simplified for SVG)
-function wrapSvgText(text: string, maxWidth: number, charWidthEstimate: number): string[] {
-    if (!text) return [];
-    const lines: string[] = [];
-    const charsPerLine = Math.max(1, Math.floor(maxWidth / charWidthEstimate));
-
-    let currentLine = "";
-    const words = text.split(' ');
-
-    for (const word of words) {
-        if (currentLine.length === 0) {
-            currentLine = word;
-        } else if ((currentLine + " " + word).length <= charsPerLine) {
-            currentLine += " " + word;
-        } else {
-            lines.push(currentLine);
-            currentLine = word;
-        }
-        while (currentLine.length > charsPerLine) {
-            lines.push(currentLine.substring(0, charsPerLine));
-            currentLine = currentLine.substring(charsPerLine);
-        }
-    }
-    if (currentLine.length > 0) {
-        lines.push(currentLine);
-    }
-    return lines;
-}
-
-
-async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Array, fileName: string }> {
-    if (!rsvgInitialized) {
-      console.warn("resvg not initialized prior to createImageForQuote, attempting now...");
-      await initializeRsvg();
-      if (!rsvgInitialized) {
-          throw new Error("Failed to initialize resvg for image creation after lazy attempt.");
-      }
-    }
-
-    const author = message.author;
-    const content = message.content || " ";
-    const avatarHash = author.avatar;
-    const userId = author.id;
-    const username = author.global_name || author.username;
-
-    const avatarSize = 96;
-    const avatarUrl = avatarHash ? `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png?size=${avatarSize}` : null;
-    let avatarBase64 = "";
-
-    if (avatarUrl) {
-        try {
-            const avatarRes = await fetch(avatarUrl);
-            if (!avatarRes.ok) throw new Error(`Failed to fetch avatar: ${avatarRes.status}`);
-            const avatarBuffer = await avatarRes.arrayBuffer();
-            const u8Array = new Uint8Array(avatarBuffer);
-            let binaryString = '';
-            for (let i = 0; i < u8Array.length; i++) {
-                binaryString += String.fromCharCode(u8Array[i]);
-            }
-            avatarBase64 = btoa(binaryString);
-        } catch (e) {
-            console.warn("Failed to load avatar, will omit from image:", e.message);
-        }
-    }
-
-    const sidePadding = 20;
-    const topBottomPadding = 20;
-    const avatarTextGap = 15;
-    const textInnerPadding = 15;
-
-    const fontSize = 18;
-    const usernameFontSize = 16;
-    const lineHeight = fontSize * 1.4;
-    const usernameLineHeight = usernameFontSize * 1.4;
-    const maxTextContentWidth = 350;
-
-    const charWidthEstimate = fontSize * 0.55;
-    const usernameCharWidthEstimate = usernameFontSize * 0.55;
-
-    const wrappedUsernameLines = wrapSvgText(username, maxTextContentWidth, usernameCharWidthEstimate);
-    const wrappedContentLines = wrapSvgText(content, maxTextContentWidth, charWidthEstimate);
-
-    const usernameBlockHeight = wrappedUsernameLines.length * usernameLineHeight;
-    const contentBlockHeight = wrappedContentLines.length * lineHeight;
-    const gapBetweenUserAndContent = (wrappedUsernameLines.length > 0 && wrappedContentLines.length > 0) ? 8 : 0;
-    const textBlockHeight = usernameBlockHeight + gapBetweenUserAndContent + contentBlockHeight;
-
-    const textContainerMinHeight = avatarBase64 ? avatarSize : (usernameBlockHeight + contentBlockHeight + gapBetweenUserAndContent);
-    const textContainerActualHeight = Math.max(textContainerMinHeight, textBlockHeight);
-    const textContainerPaddedHeight = textContainerActualHeight + 2 * textInnerPadding;
-    
-    let dynamicTextContentWidth = 0;
-    wrappedUsernameLines.forEach(line => dynamicTextContentWidth = Math.max(dynamicTextContentWidth, line.length * usernameCharWidthEstimate));
-    wrappedContentLines.forEach(line => dynamicTextContentWidth = Math.max(dynamicTextContentWidth, line.length * charWidthEstimate));
-    dynamicTextContentWidth = Math.min(maxTextContentWidth, Math.max(50, dynamicTextContentWidth));
-
-
-    const textContainerWidth = dynamicTextContentWidth + 2 * textInnerPadding;
-
-    const imageWidth = sidePadding + (avatarBase64 ? avatarSize + avatarTextGap : 0) + textContainerWidth + sidePadding;
-    const imageHeight = topBottomPadding + textContainerPaddedHeight + topBottomPadding;
-
-    let svgString = `<svg width="${imageWidth}" height="${imageHeight}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">`;
-    svgString += `<style>
-        .username { font-family: 'Noto Sans', 'DejaVu Sans', sans-serif; font-weight: bold; font-size: ${usernameFontSize}px; fill: #FFFFFF; }
-        .content { font-family: 'Noto Sans', 'DejaVu Sans', sans-serif; font-size: ${fontSize}px; fill: #E0E0E0; white-space: pre-wrap; }
-    </style>`;
-    svgString += `<rect width="100%" height="100%" fill="#23272A"/>`;
-
-    const avatarX = sidePadding;
-    const avatarY = topBottomPadding + (textContainerPaddedHeight - avatarSize) / 2;
-
-    if (avatarBase64) {
-        svgString += `<defs><clipPath id="avatarClip"><circle cx="${avatarX + avatarSize / 2}" cy="${avatarY + avatarSize / 2}" r="${avatarSize / 2}"/></clipPath></defs>`;
-        svgString += `<image xlink:href="data:image/png;base64,${avatarBase64}" x="${avatarX}" y="${avatarY}" width="${avatarSize}" height="${avatarSize}" clip-path="url(#avatarClip)"/>`;
-    }
-
-    const textContainerX = sidePadding + (avatarBase64 ? avatarSize + avatarTextGap : 0);
-    const textContainerY = topBottomPadding;
-
-    svgString += `<rect x="${textContainerX}" y="${textContainerY}" width="${textContainerWidth}" height="${textContainerPaddedHeight}" fill="rgba(0,0,0,0.55)" rx="8" ry="8"/>`;
-
-    let currentTextY = textContainerY + textInnerPadding;
-
-    if (wrappedUsernameLines.length > 0) {
-        currentTextY += usernameFontSize; 
-        for (const line of wrappedUsernameLines) {
-            svgString += `<text x="${textContainerX + textInnerPadding}" y="${currentTextY}" class="username">${escapeXml(line)}</text>`;
-            currentTextY += usernameLineHeight;
-        }
-    }
-
-    currentTextY += gapBetweenUserAndContent;
-    
-    if (wrappedContentLines.length > 0) {
-        if (wrappedUsernameLines.length === 0 && wrappedContentLines.length > 0) { 
-            currentTextY += fontSize;
-        } else if (wrappedUsernameLines.length > 0 && wrappedContentLines.length > 0) {
-             currentTextY += fontSize;
-        }
-
-
-        for (const line of wrappedContentLines) {
-            svgString += `<text x="${textContainerX + textInnerPadding}" y="${currentTextY}" class="content">${escapeXml(line)}</text>`;
-            currentTextY += lineHeight;
-        }
-    }
-
-    svgString += `</svg>`;
-
+    // 1. Fetch PFP
+    let pfpImage: Image | null = null;
     try {
-        const resvg = new Resvg(svgString, {
-            font: {
-                loadSystemFonts: false, 
-                defaultFontFamily: "Noto Sans",
-            },
-        });
-        const pngData = resvg.render();
-        const imageBuffer = pngData.asPng();
-        return { imageBuffer, fileName: "quote.png" };
+        const pfpResponse = await fetch(avatarUrl);
+        if (pfpResponse.ok) {
+            const pfpData = await pfpResponse.arrayBuffer();
+            pfpImage = new Image();
+            // skia_canvas Image.src can take Uint8Array or path.
+            // We need to ensure it correctly loads from buffer.
+            // A common pattern is to write to temp or use a method that accepts ArrayBuffer directly if available.
+            // For skia_canvas, assigning ArrayBuffer to src works.
+            pfpImage.src = new Uint8Array(pfpData);
+        }
     } catch (e) {
-        console.error("Error rendering SVG with resvg:", e);
-        console.error("SVG Content that failed (first 500 chars):", svgString.substring(0, 500));
-        throw new Error(`Failed to render quote image using resvg: ${e.message}`);
+        console.error("Failed to fetch or load PFP:", e);
+        // Could use a placeholder PFP here
     }
+
+    // 2. Prepare canvas and context (pre-calculate text height for dynamic canvas height)
+    const tempCanvasForTextMetrics = new Canvas(1, 1); // Temporary canvas for text measurement
+    const tempCtx = tempCanvasForTextMetrics.getContext("2d");
+
+    // Author Name
+    tempCtx.font = `bold ${authorNameFontSize}px sans-serif`;
+    const authorNameMetrics = tempCtx.measureText(authorName);
+    let currentHeight = padding + authorNameMetrics.actualBoundingBoxAscent + authorNameMetrics.actualBoundingBoxDescent;
+
+    // Message Content (with wrapping)
+    tempCtx.font = `${contentFontSize}px sans-serif`;
+    const words = messageContent.split(' ');
+    let line = '';
+    const lines = [];
+    for (const word of words) {
+        const testLine = line + word + ' ';
+        const metrics = tempCtx.measureText(testLine);
+        if (metrics.width > textBlockWidth - 2 * textPadding && line !== '') {
+            lines.push(line.trim());
+            line = word + ' ';
+        } else {
+            line = testLine;
+        }
+    }
+    lines.push(line.trim());
+    const lineHeight = contentFontSize * 1.4; // Approximate line height
+    currentHeight += padding / 2 + lines.length * lineHeight;
+
+    // Timestamp
+    tempCtx.font = `${timestampFontSize}px sans-serif`;
+    const timestampMetrics = tempCtx.measureText(new Date(messageTimestamp).toLocaleString());
+    currentHeight += padding / 2 + timestampMetrics.actualBoundingBoxAscent + timestampMetrics.actualBoundingBoxDescent;
+    currentHeight += padding; // Bottom padding
+
+    const canvasHeight = Math.max(pfpSize + 2 * padding, currentHeight); // Ensure canvas is at least as tall as PFP
+    const canvasWidth = padding + pfpSize + padding + textBlockWidth + padding;
+
+    const canvas = new Canvas(canvasWidth, canvasHeight);
+    const ctx = canvas.getContext("2d");
+
+    // 3. Background (optional, if you want a specific bg color for the whole image)
+    ctx.fillStyle = "#2C2F33"; // Dark Discord-like background
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+    // 4. Draw PFP
+    if (pfpImage && pfpImage.complete) { // Check if image loaded
+        // Create a circular clipping path
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(padding + pfpSize / 2, padding + pfpSize / 2, pfpSize / 2, 0, Math.PI * 2, true);
+        ctx.closePath();
+        ctx.clip();
+        ctx.drawImage(pfpImage, padding, padding, pfpSize, pfpSize);
+        ctx.restore();
+    } else {
+        // Fallback for missing PFP
+        ctx.fillStyle = "#7289DA"; // Discord blurple
+        ctx.beginPath();
+        ctx.arc(padding + pfpSize / 2, padding + pfpSize / 2, pfpSize / 2, 0, Math.PI * 2, true);
+        ctx.fill();
+        ctx.fillStyle = "white";
+        ctx.font = "bold 48px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("?", padding + pfpSize / 2, padding + pfpSize / 2 + 5); // Offset for better centering
+    }
+
+
+    // 5. Draw text background
+    const textBgX = padding + pfpSize + padding;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.5)"; // Pure black, half transparent
+    ctx.fillRect(textBgX, padding, textBlockWidth, canvasHeight - 2 * padding);
+
+    // 6. Draw text
+    ctx.fillStyle = "white";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top"; // Important for positioning lines
+
+    let yPos = padding + textPadding;
+
+    // Author Name
+    ctx.font = `bold ${authorNameFontSize}px sans-serif`;
+    ctx.fillText(authorName, textBgX + textPadding, yPos);
+    yPos += authorNameFontSize * 1.2; // Spacing after name
+
+    // Message Content
+    ctx.font = `${contentFontSize}px sans-serif`;
+    for (const l of lines) {
+        ctx.fillText(l, textBgX + textPadding, yPos);
+        yPos += lineHeight;
+    }
+    yPos += padding / 2; // Extra spacing before timestamp
+
+    // Timestamp
+    ctx.font = `${timestampFontSize}px sans-serif`;
+    ctx.fillStyle = "#99AAB5"; // Lighter gray for timestamp
+    ctx.fillText(new Date(messageTimestamp).toLocaleString(), textBgX + textPadding, yPos);
+
+    // 7. Encode to PNG
+    return canvas.encode("png"); // Returns Promise<Uint8Array>
 }
 
 
@@ -221,7 +154,7 @@ Deno.serve(async (req: Request) => {
 
     const signature = req.headers.get("x-signature-ed25519");
     const timestamp = req.headers.get("x-signature-timestamp");
-    const body = await req.text();
+    const body = await req.text(); // Read body once
 
     if (!signature || !timestamp) {
         return new Response("Bad Request: Missing Signature Headers", { status: 400 });
@@ -230,11 +163,10 @@ Deno.serve(async (req: Request) => {
     const isVerified = nacl.sign.detached.verify(
         new TextEncoder().encode(timestamp + body),
         hexToUint8Array(signature),
-        hexToUint8Array(DISCORD_PUBLIC_KEY)
+        hexToUint8Array(DISCORD_PUBLIC_KEY!)
     );
 
     if (!isVerified) {
-        console.warn("Invalid Discord signature received.");
         return new Response("Unauthorized: Invalid Discord Signature", { status: 401 });
     }
 
@@ -243,62 +175,80 @@ Deno.serve(async (req: Request) => {
     switch (interaction.type) {
         case 1: // PING
             return new Response(JSON.stringify({ type: 1 }), { headers: { "Content-Type": "application/json" } });
+        
         case 2: // APPLICATION_COMMAND
-            {
-                const commandData = interaction.data;
-                const commandName = commandData.name;
+            const commandName = interaction.data.name;
 
-                if (commandData.type === 1 && commandName === "ping") { 
-                    return new Response(JSON.stringify({ type: 4, data: { content: "Pong!" } }), { headers: { "Content-Type": "application/json" } });
-                } else if (commandData.type === 3 && commandName === "Quote Message") { 
-                    const targetMessageId = commandData.target_id;
-                    const messages = commandData.resolved?.messages;
-                    const targetMessage = messages?.[targetMessageId];
+            if (commandName === "ping") {
+                return new Response(
+                    JSON.stringify({ type: 4, data: { content: "Pong!" } }),
+                    { headers: { "Content-Type": "application/json" } }
+                );
+            } else if (commandName === "Quote Message") {
+                // This is a MESSAGE context menu command
+                // The target message is in interaction.data.resolved.messages[interaction.data.target_id]
+                const targetMessageId = interaction.data.target_id;
+                const message = interaction.data.resolved.messages[targetMessageId];
 
-                    if (!targetMessage) {
-                        console.error("Target message not found in resolved data:", JSON.stringify(commandData.resolved));
-                        return new Response(JSON.stringify({ type: 4, data: { content: "Could not find the target message data." } }), { headers: { "Content-Type": "application/json" } });
-                    }
-                    
-                    try {
-                        const { imageBuffer, fileName } = await createImageForQuote(targetMessage);
+                if (!message) {
+                    return new Response(
+                        JSON.stringify({ type: 4, data: { content: "Could not find the message to quote." } }),
+                        { headers: { "Content-Type": "application/json" } }
+                    );
+                }
 
-                        const formData = new FormData();
-                        const payloadJson = {
-                            type: 4, 
+                const author = message.author;
+                const avatarHash = author.avatar;
+                const avatarUrl = avatarHash
+                    ? `https://cdn.discordapp.com/avatars/${author.id}/${avatarHash}.png?size=128`
+                    : `https://cdn.discordapp.com/embed/avatars/${parseInt(author.discriminator) % 5}.png`; // Default avatar
+
+                try {
+                    const imageBytes = await generateQuoteImage(
+                        author.global_name || author.username, // Use global_name if available
+                        avatarUrl,
+                        message.content || "[No text content - e.g., an embed or attachment]",
+                        message.timestamp
+                    );
+
+                    // To send an image, we need a multipart/form-data response
+                    const formData = new FormData();
+                    formData.append(
+                        "payload_json",
+                        JSON.stringify({
+                            type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
                             data: {
+                                // You can add content here too, like "Here's the quote:"
+                                // content: "Quoted message:",
                                 attachments: [{
-                                    id: "0", 
-                                    filename: fileName,
-                                    description: `Quote of a message by ${targetMessage.author.global_name || targetMessage.author.username}`
+                                    id: 0, // A temporary ID for the attachment
+                                    filename: "quote.png",
+                                    description: `Quote of message ${message.id}`
                                 }]
                             }
-                        };
-                        formData.append("payload_json", JSON.stringify(payloadJson));
-                        formData.append("files[0]", new Blob([imageBuffer], { type: "image/png" }), fileName);
-                        
-                        return new Response(formData);
+                        })
+                    );
+                    formData.append("files[0]", new Blob([imageBytes], { type: "image/png" }), "quote.png");
+                    
+                    // Deno.serve and fetch API handle the Content-Type for FormData automatically
+                    return new Response(formData);
 
-                    } catch (error: any) {
-                        console.error("Error processing 'Quote Message' command:", error.stack || error.message);
-                        return new Response(JSON.stringify({ type: 4, data: { content: `Sorry, an error occurred while generating the quote: ${error.message}` } }), { headers: { "Content-Type": "application/json" } });
-                    }
-
-                } else {
-                    console.warn("Unknown command or command type received:", commandData);
-                    return new Response(JSON.stringify({ type: 4, data: { content: "Unknown command." } }), { headers: { "Content-Type": "application/json" } });
+                } catch (error) {
+                    console.error("Error generating quote image:", error);
+                    return new Response(
+                        JSON.stringify({ type: 4, data: { content: "Sorry, I couldn't generate the quote image." } }),
+                        { headers: { "Content-Type": "application/json" } }
+                    );
                 }
+
+            } else {
+                return new Response(
+                    JSON.stringify({ type: 4, data: { content: "Unknown command." } }),
+                    { headers: { "Content-Type": "application/json" } }
+                );
             }
+        
         default:
-            console.warn("Unknown interaction type received:", interaction.type);
             return new Response("Bad Request: Unknown Interaction Type", { status: 400 });
     }
 });
-
-(async () => {
-    try {
-        await initializeRsvg();
-    } catch (e) {
-        console.error("Top-level resvg initialization failed. The bot may not generate images correctly.", e);
-    }
-})();
