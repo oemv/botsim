@@ -1,6 +1,24 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-import { createCanvas, loadImage } from "https://deno.land/x/canvas@v1.4.1/mod.ts";
+import { initWasm as initResvgWasm, Resvg } from "https://esm.sh/@resvg/resvg-js@2.6.2"; // Using a slightly newer version
+
+// Initialize Resvg WASM at the top level. This is crucial.
+// Deno Deploy supports top-level await.
+const resvgWasmUrl = "https://esm.sh/@resvg/resvg-js@2.6.2/resvg.wasm";
+let resvgInitialized = false;
+try {
+    const wasmResponse = await fetch(resvgWasmUrl);
+    if (!wasmResponse.ok) throw new Error(`Failed to fetch resvg.wasm: ${wasmResponse.status}`);
+    const wasmBuffer = await wasmResponse.arrayBuffer();
+    await initResvgWasm(wasmBuffer);
+    resvgInitialized = true;
+    console.log("Resvg WASM initialized successfully.");
+} catch (e) {
+    console.error("Failed to initialize Resvg WASM:", e);
+    // If this fails, image generation will not work.
+    // The bot will still respond to pings but quote will fail.
+}
+
 
 function hexToUint8Array(hex: string): Uint8Array {
     return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
@@ -11,118 +29,164 @@ if (!DISCORD_PUBLIC_KEY) {
     throw new Error("DISCORD_PUBLIC_KEY is not set.");
 }
 
-async function generateQuoteImage(avatarUrl: string, username: string, messageContent: string): Promise<Uint8Array> {
-    // --- Image constants ---
-    const avatarSize = 96;
-    const padding = 15;
-    const textPadding = 12; // Padding inside the quote box
-    const authorTextSize = 20;
-    const messageTextSize = 18;
-    const lineHeightMultiplier = 1.3;
-    const maxTextWidth = 450; // Max width for the text content area
-    const backgroundColor = "#313338"; // Discord-like dark background for the whole image
-    const quoteBoxColor = "rgba(0, 0, 0, 0.5)"; // Semi-transparent black for the text box
-    const authorTextColor = "#FFFFFF";
-    const messageTextColor = "#DBDEE1"; // Discord's message text color
-
-    // --- Load avatar ---
-    let avatarImage;
-    try {
-        avatarImage = await loadImage(avatarUrl);
-    } catch (e) {
-        console.warn("Failed to load primary avatar:", avatarUrl, e);
-        // Fallback to a default Discord avatar if the primary one fails
-        try {
-            avatarImage = await loadImage(`https://cdn.discordapp.com/embed/avatars/0.png`); // Default grey avatar
-        } catch (defaultError) {
-            console.error("Failed to load default avatar:", defaultError);
-            // If even default fails, we might need a placeholder canvas or throw
-            throw new Error("Could not load avatar image or default fallback.");
+// Helper to escape XML/SVG special characters
+function escapeXml(unsafe: string): string {
+    return unsafe.replace(/[<>&'"]/g, (c) => {
+        switch (c) {
+            case '<': return '<';
+            case '>': return '>';
+            case '&': return '&';
+            case '\'': return ''';
+            case '"': return '"';
+            default: return c;
         }
-    }
+    });
+}
 
-    // --- Prepare text and calculate dimensions ---
-    const tempCanvas = createCanvas(1, 1); // For text measurement
-    const tempCtx = tempCanvas.getContext("2d");
-
-    // Author text (single line)
-    tempCtx.font = `bold ${authorTextSize}px "gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif`;
-    const authorText = username;
-    const authorLineHeight = authorTextSize * lineHeightMultiplier;
-
-    // Message text (potentially multiple lines)
-    tempCtx.font = `${messageTextSize}px "gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif`;
-    const words = (messageContent || "[No Content]").split(' ');
+// Basic text wrapper for SVG
+function wrapText(text: string, maxWidth: number, fontSize: number, lineHeightMultiplier: number, font: string): { lines: string[], height: number } {
+    const words = text.split(/\s+/);
     const lines: string[] = [];
     let currentLine = "";
+    const spaceWidth = fontSize * 0.3; // Approximate width of a space
+
+    // This is a very naive way to measure text width.
+    // A proper way would use a canvas or font metrics library, but we're avoiding canvas.
+    // For monospaced or well-behaved fonts, character count can be a rough proxy.
+    // For variable-width fonts, this is very approximate.
+    // Let's assume an average character width relative to font size.
+    const avgCharWidth = fontSize * 0.55; // Highly dependent on font
+
     for (const word of words) {
-        const testLine = currentLine + (currentLine ? " " : "") + word;
-        const metrics = tempCtx.measureText(testLine);
-        if (metrics.width > maxTextWidth && currentLine) {
+        const potentialLine = currentLine ? currentLine + " " + word : word;
+        // Naive width calculation
+        if ((potentialLine.length * avgCharWidth) > maxWidth && currentLine) {
             lines.push(currentLine);
             currentLine = word;
         } else {
-            currentLine = testLine;
+            currentLine = potentialLine;
         }
     }
-    lines.push(currentLine);
-    if (lines.length === 0 && !messageContent) lines.push("[No Content]");
+    if (currentLine) {
+        lines.push(currentLine);
+    }
+    if (lines.length === 0 && text) lines.push(text); // Handle single very long word or short text
+    if (lines.length === 0 && !text) lines.push("[No Content]");
 
 
-    const messageBlockHeight = lines.length * (messageTextSize * lineHeightMultiplier);
-    const totalTextHeightInsideQuoteBox = authorLineHeight + messageBlockHeight;
+    return {
+        lines: lines.map(escapeXml),
+        height: lines.length * fontSize * lineHeightMultiplier,
+    };
+}
+
+
+async function generateQuoteImageSVG(avatarUrl: string, username: string, messageContent: string): Promise<Uint8Array> {
+    if (!resvgInitialized) {
+        throw new Error("Resvg WASM not initialized. Cannot generate image.");
+    }
+
+    // --- Image constants ---
+    const avatarSize = 96;
+    const padding = 15;
+    const textPadding = 12;
+    const authorTextSize = 20;
+    const messageTextSize = 18;
+    const lineHeightMultiplier = 1.3;
+    const maxTextWidth = 450;
+    const backgroundColor = "#313338";
+    const quoteBoxColor = "rgba(0, 0, 0, 0.5)";
+    const authorTextColor = "#FFFFFF";
+    const messageTextColor = "#DBDEE1";
+    const fontFamily = `"gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif`; // Common Discord/system fonts
+
+    // --- Fetch and Base64 encode avatar ---
+    let avatarDataUrl = `https://cdn.discordapp.com/embed/avatars/0.png`; // Default
+    try {
+        const avatarResponse = await fetch(avatarUrl);
+        if (avatarResponse.ok) {
+            const avatarBuffer = await avatarResponse.arrayBuffer();
+            const base64Avatar = btoa(String.fromCharCode(...new Uint8Array(avatarBuffer)));
+            const contentType = avatarResponse.headers.get("content-type") || "image/png";
+            avatarDataUrl = `data:${contentType};base64,${base64Avatar}`;
+        } else {
+            console.warn(`Failed to fetch avatar (${avatarResponse.status}), using default.`);
+        }
+    } catch (e) {
+        console.warn("Error fetching avatar, using default:", e);
+    }
+
+    // --- Prepare text ---
+    const escapedUsername = escapeXml(username);
+    const messageWrapped = wrapText(messageContent || "[No Content]", maxTextWidth - (textPadding * 2), messageTextSize, lineHeightMultiplier, fontFamily);
+
+    const authorLineHeight = authorTextSize * lineHeightMultiplier;
+    const totalTextHeightInsideQuoteBox = authorLineHeight + messageWrapped.height;
     const quoteBoxContentHeight = textPadding + totalTextHeightInsideQuoteBox + textPadding;
 
-    // --- Calculate overall canvas dimensions ---
-    const quoteBoxHeight = Math.max(avatarSize, quoteBoxContentHeight); // Quote box matches avatar height or text height
+    const quoteBoxHeight = Math.max(avatarSize, quoteBoxContentHeight);
     const imageWidth = padding + avatarSize + padding + maxTextWidth + padding;
     const imageHeight = padding + quoteBoxHeight + padding;
 
-    const canvas = createCanvas(imageWidth, imageHeight);
-    const ctx = canvas.getContext("2d");
-
-    // Draw background for the entire image
-    ctx.fillStyle = backgroundColor;
-    ctx.fillRect(0, 0, imageWidth, imageHeight);
-
-    // Draw avatar (circular crop would be nice, but keeping it simple as square)
-    // To make it circular:
-    // ctx.save();
-    // ctx.beginPath();
-    // ctx.arc(padding + avatarSize / 2, padding + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2, true);
-    // ctx.closePath();
-    // ctx.clip();
-    // ctx.drawImage(avatarImage, padding, padding, avatarSize, avatarSize);
-    // ctx.restore();
-    // For simplicity, using square avatar:
-    ctx.drawImage(avatarImage, padding, padding + (quoteBoxHeight - avatarSize) / 2, avatarSize, avatarSize);
-
-
-    // Draw semi-transparent quote box
     const quoteBoxX = padding + avatarSize + padding;
     const quoteBoxY = padding;
-    ctx.fillStyle = quoteBoxColor;
-    ctx.fillRect(quoteBoxX, quoteBoxY, maxTextWidth, quoteBoxHeight);
 
-    // Draw author text
-    ctx.fillStyle = authorTextColor;
-    ctx.font = `bold ${authorTextSize}px "gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif`;
-    // Align text to the top of the quote box content area
+    // --- Construct SVG ---
+    let svg = `<svg width="${imageWidth}" height="${imageHeight}" viewBox="0 0 ${imageWidth} ${imageHeight}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">`;
+    svg += `<style>
+        .author { font: bold ${authorTextSize}px ${fontFamily}; fill: ${authorTextColor}; }
+        .message { font: ${messageTextSize}px ${fontFamily}; fill: ${messageTextColor}; }
+    </style>`;
+    // Background for the entire image
+    svg += `<rect width="100%" height="100%" fill="${backgroundColor}"/>`;
+
+    // Avatar (square, could add clip-path for circle if desired)
+    // To make it circular:
+    // svg += `<defs><clipPath id="avatarClip"><circle cx="${padding + avatarSize / 2}" cy="${padding + avatarSize / 2 + (quoteBoxHeight - avatarSize) / 2}" r="${avatarSize / 2}" /></clipPath></defs>`;
+    // svg += `<image x="${padding}" y="${padding + (quoteBoxHeight - avatarSize) / 2}" width="${avatarSize}" height="${avatarSize}" xlink:href="${avatarDataUrl}" clip-path="url(#avatarClip)" />`;
+    svg += `<image x="${padding}" y="${padding + (quoteBoxHeight - avatarSize) / 2}" width="${avatarSize}" height="${avatarSize}" xlink:href="${avatarDataUrl}" />`;
+
+
+    // Semi-transparent quote box
+    svg += `<rect x="${quoteBoxX}" y="${quoteBoxY}" width="${maxTextWidth}" height="${quoteBoxHeight}" fill="${quoteBoxColor}" rx="5" ry="5" />`; // Added rounded corners
+
+    // Author text
     let currentTextY = quoteBoxY + textPadding + authorTextSize; // Baseline for author text
-    ctx.fillText(authorText, quoteBoxX + textPadding, currentTextY);
+    svg += `<text x="${quoteBoxX + textPadding}" y="${currentTextY}" class="author">${escapedUsername}</text>`;
 
-    // Draw message text
+    // Message text lines
     currentTextY += (authorLineHeight - authorTextSize); // Move to bottom of author line
     currentTextY += (messageTextSize * lineHeightMultiplier * 0.3); // Small gap
-    ctx.fillStyle = messageTextColor;
-    ctx.font = `${messageTextSize}px "gg sans", "Noto Sans", "Helvetica Neue", Helvetica, Arial, sans-serif`;
-    for (const line of lines) {
+
+    for (const line of messageWrapped.lines) {
         currentTextY += (messageTextSize * lineHeightMultiplier);
-        ctx.fillText(line, quoteBoxX + textPadding, currentTextY);
+        svg += `<text x="${quoteBoxX + textPadding}" y="${currentTextY}" class="message">${line}</text>`;
     }
 
-    return canvas.toBuffer("image/png");
+    svg += `</svg>`;
+
+    // --- Render SVG to PNG ---
+    const resvg = new Resvg(svg, {
+        // background: backgroundColor, // Already in SVG
+        fitTo: {
+            mode: 'original',
+        },
+        font: {
+            // resvg-js has some default font fallbacks.
+            // For best results, you might load custom fonts if specific ones are needed
+            // and not available in its default set (e.g. Noto Sans is often included).
+            // For "gg sans", it will likely fallback to a generic sans-serif.
+            fontFiles: [], // You can load .ttf/.otf files here if needed
+            loadSystemFonts: false, // Deno Deploy doesn't have system fonts in a typical way
+            defaultFontFamily: 'sans-serif',
+        },
+        // logLevel: 'debug', // For troubleshooting SVG rendering
+    });
+
+    const pngData = resvg.render();
+    return pngData.asPng();
 }
+
 
 Deno.serve(async (req: Request) => {
     if (req.method !== "POST") {
@@ -159,6 +223,10 @@ Deno.serve(async (req: Request) => {
             if (appCmdData.type === 1 && commandName === "ping") { // CHAT_INPUT (Slash Command)
                 return new Response(JSON.stringify({ type: 4, data: { content: "Pong!" } }), { headers: { "Content-Type": "application/json" } });
             } else if (appCmdData.type === 3 && commandName === "Quote Message") { // MESSAGE_CONTEXT_MENU
+                if (!resvgInitialized) {
+                     console.error("Quote command received but Resvg is not initialized.");
+                     return new Response(JSON.stringify({ type: 4, data: { content: "Sorry, the image generation service is not ready. Please try again in a moment.", flags: 64 /* Ephemeral */ } }), { headers: { "Content-Type": "application/json" } });
+                }
                 const targetMessageId = appCmdData.target_id;
                 const targetMessage = appCmdData.resolved.messages[targetMessageId];
 
@@ -170,23 +238,25 @@ Deno.serve(async (req: Request) => {
                 const author = targetMessage.author;
                 let avatarUrl: string;
                 if (author.avatar) {
-                    // Request PNG, Discord CDN will convert animated to static PNG if .png is requested
                     avatarUrl = `https://cdn.discordapp.com/avatars/${author.id}/${author.avatar}.png?size=128`;
                 } else {
-                    // Default avatar based on discriminator
                     avatarUrl = `https://cdn.discordapp.com/embed/avatars/${parseInt(author.discriminator) % 5}.png`;
                 }
 
                 try {
-                    const imageBuffer = await generateQuoteImage(avatarUrl, author.username, targetMessage.content);
+                    // Respond immediately with a "thinking" state (deferred response)
+                    // This is good practice if image generation might take >3s, but for "instant" we try direct.
+                    // If it becomes slow, uncomment this and send a followup.
+                    // For now, we aim for direct response.
+
+                    const imageBuffer = await generateQuoteImageSVG(avatarUrl, author.username, targetMessage.content);
 
                     const formData = new FormData();
                     const payload = {
                         type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
                         data: {
-                            // content: `Quoted by <@${interaction.member?.user?.id || interaction.user?.id}>:`, // Optional: add who quoted
                             attachments: [{
-                                id: "0", // String or number, used to reference the file
+                                id: "0",
                                 filename: "quote.png",
                                 description: `Quote of ${author.username}'s message`
                             }]
@@ -201,7 +271,6 @@ Deno.serve(async (req: Request) => {
                     return new Response(JSON.stringify({ type: 4, data: { content: "Sorry, I couldn't generate the quote image. " + error.message, flags: 64 /* Ephemeral */ } }), { headers: { "Content-Type": "application/json" } });
                 }
             } else {
-                // Fallback for unknown command names or types (e.g. User commands if not handled)
                 return new Response(JSON.stringify({ type: 4, data: { content: "Unknown application command.", flags: 64 /* Ephemeral */ } }), { headers: { "Content-Type": "application/json" } });
             }
         default:
