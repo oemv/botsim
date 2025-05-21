@@ -39,7 +39,7 @@ function escapeXml(unsafe: string): string {
             case '<': return '<';
             case '>': return '>';
             case '&': return '&';
-            case '\'': return '''; // Corrected single quote escape
+            case '\'': return '''; // THIS LINE MUST BE EXACTLY THIS
             case '"': return '"';
             default: return c;
         }
