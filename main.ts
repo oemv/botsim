@@ -1,8 +1,7 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
 // Ensure this resvg_wasm version and URL are correct and accessible for your Deno Deploy environment.
-// If v0.2.0 was problematic, you might need to find the latest stable tag on deno.land/x.
-// For example, if there's a v0.3.0 or similar, adjust both URLs.
+// Using v0.2.0 as per previous discussions. Adjust if needed.
 import initRsvg, { Resvg } from "https://deno.land/x/resvg_wasm@v0.2.0/mod.js";
 
 const rsvgWasmUrl = new URL("https://deno.land/x/resvg_wasm@v0.2.0/resvg_wasm_bg.wasm");
@@ -40,7 +39,7 @@ function escapeXml(unsafe: string): string {
             case '<': return '<';
             case '>': return '>';
             case '&': return '&';
-            case '\'': return '''; // THIS IS THE CRITICAL FIX
+            case '\'': return '''; // Corrected single quote escape
             case '"': return '"';
             default: return c;
         }
@@ -141,7 +140,7 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
     let dynamicTextContentWidth = 0;
     wrappedUsernameLines.forEach(line => dynamicTextContentWidth = Math.max(dynamicTextContentWidth, line.length * usernameCharWidthEstimate));
     wrappedContentLines.forEach(line => dynamicTextContentWidth = Math.max(dynamicTextContentWidth, line.length * charWidthEstimate));
-    dynamicTextContentWidth = Math.min(maxTextContentWidth, Math.max(50, dynamicTextContentWidth)); // Ensure a minimum width
+    dynamicTextContentWidth = Math.min(maxTextContentWidth, Math.max(50, dynamicTextContentWidth));
 
 
     const textContainerWidth = dynamicTextContentWidth + 2 * textInnerPadding;
@@ -182,14 +181,9 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
     currentTextY += gapBetweenUserAndContent;
     
     if (wrappedContentLines.length > 0) {
-        if (wrappedUsernameLines.length === 0) { // If no username, first line of content needs initial font size offset
+        if (wrappedUsernameLines.length === 0 && wrappedContentLines.length > 0) { 
             currentTextY += fontSize;
-        } else if (gapBetweenUserAndContent === 0 && wrappedUsernameLines.length > 0) {
-            // This case should ideally not happen if both have content and gap is defined
-            // but if it did, we'd need to ensure currentTextY is properly positioned after username
-        } else if (wrappedUsernameLines.length > 0) {
-            // currentTextY is already advanced past username block and gap
-            // Add first line's font size for its baseline
+        } else if (wrappedUsernameLines.length > 0 && wrappedContentLines.length > 0) {
              currentTextY += fontSize;
         }
 
