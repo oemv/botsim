@@ -1,6 +1,8 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-import { Canvas, Image } from "https://deno.land/x/skia_canvas@0.5.5/mod.ts"; // Using skia_canvas for image generation
+// Import 'canvas' which uses WASM-based Skia (CanvasKit)
+import { createCanvas, loadImage } from "https://deno.land/x/canvas@v1.4.1/mod.ts";
+// Note: 'Image' class is not directly exported like in skia_canvas, loadImage is used.
 
 function hexToUint8Array(hex: string): Uint8Array {
     return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
@@ -24,34 +26,29 @@ async function generateQuoteImage(
     const contentFontSize = 18;
     const timestampFontSize = 14;
     const textBlockWidth = 400;
-    const imageQuality = 0.85; // For JPEG, not used for PNG but good to keep in mind for alternatives
 
-    // 1. Fetch PFP
-    let pfpImage: Image | null = null;
+    // 1. Fetch and load PFP
+    let pfpImage: any | null = null; // Type from deno-canvas loadImage
     try {
         const pfpResponse = await fetch(avatarUrl);
         if (pfpResponse.ok) {
             const pfpData = await pfpResponse.arrayBuffer();
-            pfpImage = new Image();
-            // skia_canvas Image.src can take Uint8Array or path.
-            // We need to ensure it correctly loads from buffer.
-            // A common pattern is to write to temp or use a method that accepts ArrayBuffer directly if available.
-            // For skia_canvas, assigning ArrayBuffer to src works.
-            pfpImage.src = new Uint8Array(pfpData);
+            pfpImage = await loadImage(new Uint8Array(pfpData)); // Use loadImage
         }
     } catch (e) {
         console.error("Failed to fetch or load PFP:", e);
-        // Could use a placeholder PFP here
     }
 
     // 2. Prepare canvas and context (pre-calculate text height for dynamic canvas height)
-    const tempCanvasForTextMetrics = new Canvas(1, 1); // Temporary canvas for text measurement
+    // For deno-canvas, text metrics are slightly different; we'll make it a bit more generous
+    const tempCanvasForTextMetrics = createCanvas(1, 1);
     const tempCtx = tempCanvasForTextMetrics.getContext("2d");
 
     // Author Name
     tempCtx.font = `bold ${authorNameFontSize}px sans-serif`;
+    // measureText in deno-canvas returns an object with 'width'
     const authorNameMetrics = tempCtx.measureText(authorName);
-    let currentHeight = padding + authorNameMetrics.actualBoundingBoxAscent + authorNameMetrics.actualBoundingBoxDescent;
+    let currentHeight = padding + authorNameFontSize * 1.2; // Approximate height
 
     // Message Content (with wrapping)
     tempCtx.font = `${contentFontSize}px sans-serif`;
@@ -69,28 +66,26 @@ async function generateQuoteImage(
         }
     }
     lines.push(line.trim());
-    const lineHeight = contentFontSize * 1.4; // Approximate line height
+    const lineHeight = contentFontSize * 1.4;
     currentHeight += padding / 2 + lines.length * lineHeight;
 
     // Timestamp
     tempCtx.font = `${timestampFontSize}px sans-serif`;
-    const timestampMetrics = tempCtx.measureText(new Date(messageTimestamp).toLocaleString());
-    currentHeight += padding / 2 + timestampMetrics.actualBoundingBoxAscent + timestampMetrics.actualBoundingBoxDescent;
-    currentHeight += padding; // Bottom padding
+    currentHeight += padding / 2 + timestampFontSize * 1.2;
+    currentHeight += padding;
 
-    const canvasHeight = Math.max(pfpSize + 2 * padding, currentHeight); // Ensure canvas is at least as tall as PFP
+    const canvasHeight = Math.max(pfpSize + 2 * padding, currentHeight);
     const canvasWidth = padding + pfpSize + padding + textBlockWidth + padding;
 
-    const canvas = new Canvas(canvasWidth, canvasHeight);
+    const canvas = createCanvas(canvasWidth, canvasHeight); // Use createCanvas
     const ctx = canvas.getContext("2d");
 
-    // 3. Background (optional, if you want a specific bg color for the whole image)
-    ctx.fillStyle = "#2C2F33"; // Dark Discord-like background
+    // 3. Background
+    ctx.fillStyle = "#2C2F33";
     ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
     // 4. Draw PFP
-    if (pfpImage && pfpImage.complete) { // Check if image loaded
-        // Create a circular clipping path
+    if (pfpImage) {
         ctx.save();
         ctx.beginPath();
         ctx.arc(padding + pfpSize / 2, padding + pfpSize / 2, pfpSize / 2, 0, Math.PI * 2, true);
@@ -99,8 +94,7 @@ async function generateQuoteImage(
         ctx.drawImage(pfpImage, padding, padding, pfpSize, pfpSize);
         ctx.restore();
     } else {
-        // Fallback for missing PFP
-        ctx.fillStyle = "#7289DA"; // Discord blurple
+        ctx.fillStyle = "#7289DA";
         ctx.beginPath();
         ctx.arc(padding + pfpSize / 2, padding + pfpSize / 2, pfpSize / 2, 0, Math.PI * 2, true);
         ctx.fill();
@@ -108,26 +102,25 @@ async function generateQuoteImage(
         ctx.font = "bold 48px sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("?", padding + pfpSize / 2, padding + pfpSize / 2 + 5); // Offset for better centering
+        ctx.fillText("?", padding + pfpSize / 2, padding + pfpSize / 2 + 5);
     }
-
 
     // 5. Draw text background
     const textBgX = padding + pfpSize + padding;
-    ctx.fillStyle = "rgba(0, 0, 0, 0.5)"; // Pure black, half transparent
+    ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
     ctx.fillRect(textBgX, padding, textBlockWidth, canvasHeight - 2 * padding);
 
     // 6. Draw text
     ctx.fillStyle = "white";
     ctx.textAlign = "left";
-    ctx.textBaseline = "top"; // Important for positioning lines
+    ctx.textBaseline = "top";
 
     let yPos = padding + textPadding;
 
     // Author Name
     ctx.font = `bold ${authorNameFontSize}px sans-serif`;
     ctx.fillText(authorName, textBgX + textPadding, yPos);
-    yPos += authorNameFontSize * 1.2; // Spacing after name
+    yPos += authorNameFontSize * 1.2;
 
     // Message Content
     ctx.font = `${contentFontSize}px sans-serif`;
@@ -135,15 +128,16 @@ async function generateQuoteImage(
         ctx.fillText(l, textBgX + textPadding, yPos);
         yPos += lineHeight;
     }
-    yPos += padding / 2; // Extra spacing before timestamp
+    yPos += padding / 2;
 
     // Timestamp
     ctx.font = `${timestampFontSize}px sans-serif`;
-    ctx.fillStyle = "#99AAB5"; // Lighter gray for timestamp
+    ctx.fillStyle = "#99AAB5";
     ctx.fillText(new Date(messageTimestamp).toLocaleString(), textBgX + textPadding, yPos);
 
     // 7. Encode to PNG
-    return canvas.encode("png"); // Returns Promise<Uint8Array>
+    // deno-canvas's toBuffer is synchronous but generateQuoteImage is async
+    return Promise.resolve(canvas.toBuffer("image/png")); // Use toBuffer and ensure it's a promise
 }
 
 
@@ -154,7 +148,7 @@ Deno.serve(async (req: Request) => {
 
     const signature = req.headers.get("x-signature-ed25519");
     const timestamp = req.headers.get("x-signature-timestamp");
-    const body = await req.text(); // Read body once
+    const body = await req.text();
 
     if (!signature || !timestamp) {
         return new Response("Bad Request: Missing Signature Headers", { status: 400 });
@@ -177,7 +171,8 @@ Deno.serve(async (req: Request) => {
             return new Response(JSON.stringify({ type: 1 }), { headers: { "Content-Type": "application/json" } });
         
         case 2: // APPLICATION_COMMAND
-            const commandName = interaction.data.name;
+            const commandData = interaction.data;
+            const commandName = commandData.name;
 
             if (commandName === "ping") {
                 return new Response(
@@ -185,10 +180,8 @@ Deno.serve(async (req: Request) => {
                     { headers: { "Content-Type": "application/json" } }
                 );
             } else if (commandName === "Quote Message") {
-                // This is a MESSAGE context menu command
-                // The target message is in interaction.data.resolved.messages[interaction.data.target_id]
-                const targetMessageId = interaction.data.target_id;
-                const message = interaction.data.resolved.messages[targetMessageId];
+                const targetMessageId = commandData.target_id;
+                const message = commandData.resolved.messages[targetMessageId];
 
                 if (!message) {
                     return new Response(
@@ -199,29 +192,29 @@ Deno.serve(async (req: Request) => {
 
                 const author = message.author;
                 const avatarHash = author.avatar;
+                // Use author.display_name if available (for server nicknames), fallback to global_name, then username
+                const displayName = message.member?.nick || author.global_name || author.username;
+                
                 const avatarUrl = avatarHash
                     ? `https://cdn.discordapp.com/avatars/${author.id}/${avatarHash}.png?size=128`
-                    : `https://cdn.discordapp.com/embed/avatars/${parseInt(author.discriminator) % 5}.png`; // Default avatar
+                    : `https://cdn.discordapp.com/embed/avatars/${parseInt(author.discriminator === "0" ? author.id.slice(-1) : author.discriminator) % 5}.png`; // Updated default avatar logic for new usernames
 
                 try {
                     const imageBytes = await generateQuoteImage(
-                        author.global_name || author.username, // Use global_name if available
+                        displayName,
                         avatarUrl,
                         message.content || "[No text content - e.g., an embed or attachment]",
                         message.timestamp
                     );
 
-                    // To send an image, we need a multipart/form-data response
                     const formData = new FormData();
                     formData.append(
                         "payload_json",
                         JSON.stringify({
-                            type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
+                            type: 4,
                             data: {
-                                // You can add content here too, like "Here's the quote:"
-                                // content: "Quoted message:",
                                 attachments: [{
-                                    id: 0, // A temporary ID for the attachment
+                                    id: 0,
                                     filename: "quote.png",
                                     description: `Quote of message ${message.id}`
                                 }]
@@ -230,7 +223,6 @@ Deno.serve(async (req: Request) => {
                     );
                     formData.append("files[0]", new Blob([imageBytes], { type: "image/png" }), "quote.png");
                     
-                    // Deno.serve and fetch API handle the Content-Type for FormData automatically
                     return new Response(formData);
 
                 } catch (error) {
