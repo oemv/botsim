@@ -1,28 +1,37 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-// Using deno-canvas with explicit initialization
-import { createCanvas, init as initCanvasKit } from "https://deno.land/x/canvas@v1.4.1/mod.ts";
+import { Image, decode, Font } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
 
-// --- CanvasKit Initialization ---
-// URL for the CanvasKit WASM file that deno-canvas v1.4.1 uses (based on its deps.ts)
-const CANVAS_KIT_WASM_URL = "https://unpkg.com/canvaskit-wasm@0.39.1/bin/canvaskit.wasm";
-let canvasInitialized = false;
-let canvasInitializationError: string | null = null;
+// --- Font Initialization ---
+// We'll use Noto Sans, a common and good-looking open-source font.
+// We fetch it once when the Deno Deploy instance starts.
+const FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Regular.ttf";
+const ITALIC_FONT_URL = "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Italic.ttf"; // For the author
 
-// Top-level await for initialization. Deno Deploy supports this.
-// This block will run once when your Deno Deploy instance starts.
-try {
-    console.log(`Attempting to initialize CanvasKit from ${CANVAS_KIT_WASM_URL}...`);
-    await initCanvasKit(CANVAS_KIT_WASM_URL);
-    canvasInitialized = true;
-    console.log("CanvasKit initialized successfully!");
-} catch (e) {
-    console.error("CRITICAL: Failed to initialize CanvasKit on startup:", e);
-    canvasInitializationError = e.message || String(e);
-    // The bot will still run, but image generation will fail.
-    // The "Quote Message" handler will inform the user.
-}
-// --- End CanvasKit Initialization ---
+let mainFont: Font | null = null;
+let italicFont: Font | null = null;
+let fontInitializationError: string | null = null;
+
+// Top-level await for font initialization.
+(async () => {
+    try {
+        console.log(`Attempting to fetch and decode font from ${FONT_URL}...`);
+        const fontData = await fetch(FONT_URL).then(res => res.arrayBuffer());
+        mainFont = decode(fontData) as Font; // Cast to Font
+        console.log("Main font decoded successfully!");
+
+        console.log(`Attempting to fetch and decode italic font from ${ITALIC_FONT_URL}...`);
+        const italicFontData = await fetch(ITALIC_FONT_URL).then(res => res.arrayBuffer());
+        italicFont = decode(italicFontData) as Font;
+        console.log("Italic font decoded successfully!");
+
+    } catch (e) {
+        console.error("CRITICAL: Failed to initialize font(s) on startup:", e);
+        fontInitializationError = e.message || String(e);
+    }
+})();
+// --- End Font Initialization ---
+
 
 function hexToUint8Array(hex: string): Uint8Array {
     return new Uint8Array(hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
@@ -37,97 +46,84 @@ async function generateSimpleQuoteImage(
     authorDisplayName: string,
     messageContent: string
 ): Promise<Uint8Array> {
-    if (!canvasInitialized) {
-        // This is a safeguard. The main handler should check canvasInitialized first.
-        throw new Error(`Image generation called but CanvasKit not initialized. Error: ${canvasInitializationError || "Unknown initialization error."}`);
+    if (!mainFont || !italicFont) {
+        throw new Error(`Image generation called but font(s) not initialized. Error: ${fontInitializationError || "Unknown font initialization error."}`);
     }
 
-    const bgColor = "#36393F"; // Discord dark theme background
-    const textColor = "#DCDDDE"; // Discord light text for content
-    const authorColor = "#B9BBBE"; // Discord slightly dimmer text for author
+    const bgColor = 0x36393FFF; // Discord dark theme background (RGBA)
+    const textColor = 0xDCDDDEFF; // Discord light text for content
+    const authorColor = 0xB9BBBEFF; // Discord slightly dimmer text for author
 
-    const padding = 25; // Generous padding around the text
-    const contentFontSize = 20;
-    const authorFontSize = 16;
-    const maxTextWidth = 550; // Max width for the text content itself
-    const lineSpacing = 1.4; // Multiplier for line height
+    const padding = 30; // Increased padding
+    const contentFontSize = 28; // Increased for better readability
+    const authorFontSize = 22;  // Increased for better readability
+    const maxTextWidth = 600; // Max width for the text content itself
+    const lineSpacingFactor = 1.4; // Multiplier for line height
 
-    // 1. Prepare canvas for text measurement
-    const tempCanvas = createCanvas(1, 1);
-    const tempCtx = tempCanvas.getContext("2d");
+    // 1. Format quote and author text
+    const fullQuoteText = `“${messageContent}”`; // Using better quote marks
+    const authorLineText = `— ${authorDisplayName}`;
 
-    // 2. Format quote and author text
-    const fullQuoteText = `"${messageContent}"`;
-    const authorLineText = `- ${authorDisplayName}`;
-
-    // 3. Calculate wrapped lines for the quote content
-    tempCtx.font = `${contentFontSize}px sans-serif`;
-    const quoteWords = fullQuoteText.split(' ');
+    // 2. Calculate wrapped lines for the quote content
+    // imagescript's measureText needs the font size.
     const quoteLines: string[] = [];
     let currentLine = '';
-    for (const word of quoteWords) {
-        const testLine = currentLine + word + ' ';
-        const metrics = tempCtx.measureText(testLine);
-        if (metrics.width > maxTextWidth && currentLine !== '') {
-            quoteLines.push(currentLine.trim());
-            currentLine = word + ' ';
+    const words = fullQuoteText.split(' ');
+
+    for (const word of words) {
+        const testLine = currentLine ? currentLine + ' ' + word : word;
+        const lineWidth = mainFont.measureWidth(testLine, contentFontSize);
+        if (lineWidth > maxTextWidth && currentLine) {
+            quoteLines.push(currentLine);
+            currentLine = word;
         } else {
             currentLine = testLine;
         }
     }
-    quoteLines.push(currentLine.trim()); // Add the last line
+    if (currentLine) quoteLines.push(currentLine); // Add the last line
 
-    const quoteTextHeight = quoteLines.length * (contentFontSize * lineSpacing);
+    const contentLineHeight = contentFontSize * lineSpacingFactor;
+    const quoteTextHeight = quoteLines.length * contentLineHeight;
 
-    // 4. Calculate author text dimensions
-    tempCtx.font = `italic ${authorFontSize}px sans-serif`;
-    const authorTextMetrics = tempCtx.measureText(authorLineText);
-    const authorTextHeight = authorFontSize * lineSpacing;
+    // 3. Calculate author text dimensions
+    const authorTextWidth = italicFont.measureWidth(authorLineText, authorFontSize);
+    const authorLineHeight = authorFontSize * lineSpacingFactor;
 
-    // 5. Calculate total canvas dimensions
-    const totalTextHeight = quoteTextHeight + (authorLineText ? (authorTextHeight + padding / 2) : 0);
+    // 4. Calculate total canvas dimensions
+    const totalTextHeight = quoteTextHeight + (authorLineText ? (authorLineHeight + padding / 2) : 0);
     const canvasHeight = Math.ceil(totalTextHeight + 2 * padding);
-    // Determine max width needed from wrapped lines or author line
+
     let requiredWidth = 0;
-    tempCtx.font = `${contentFontSize}px sans-serif`; // Reset for quote lines measurement
     quoteLines.forEach(line => {
-        const metrics = tempCtx.measureText(line);
-        if (metrics.width > requiredWidth) requiredWidth = metrics.width;
+        const lineWidth = mainFont.measureWidth(line, contentFontSize);
+        if (lineWidth > requiredWidth) requiredWidth = lineWidth;
     });
-    if (authorTextMetrics.width > requiredWidth) requiredWidth = authorTextMetrics.width;
-    const canvasWidth = Math.ceil(Math.min(maxTextWidth, requiredWidth) + 2 * padding);
+    if (authorTextWidth > requiredWidth) requiredWidth = authorTextWidth;
+    const canvasWidth = Math.ceil(Math.min(maxTextWidth + padding, requiredWidth) + 2 * padding); // Ensure some padding even if text is narrow
 
+    // 5. Create image and draw
+    const image = new Image(canvasWidth, canvasHeight);
+    image.fill(bgColor);
 
-    // 6. Create final canvas and draw
-    const canvas = createCanvas(canvasWidth, canvasHeight);
-    const ctx = canvas.getContext("2d");
-
-    // Background
-    ctx.fillStyle = bgColor;
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
     let yPos = padding;
 
     // Draw Quote Content
-    ctx.font = `${contentFontSize}px sans-serif`;
-    ctx.fillStyle = textColor;
     for (const line of quoteLines) {
-        ctx.fillText(line, padding, yPos);
-        yPos += contentFontSize * lineSpacing;
+        const textX = (canvasWidth - mainFont.measureWidth(line, contentFontSize)) / 2; // Center each line
+        image.print(mainFont, textX, yPos, line, contentFontSize, textColor);
+        yPos += contentLineHeight;
     }
 
     // Draw Author
     if (authorLineText) {
-        yPos += padding / 2; // Space before author line
-        ctx.font = `italic ${authorFontSize}px sans-serif`;
-        ctx.fillStyle = authorColor;
-        ctx.fillText(authorLineText, padding, yPos);
+        yPos += padding / 4; // Smaller space before author line
+        const authorX = canvasWidth - authorTextWidth - padding; // Align author to the right
+        image.print(italicFont, authorX, yPos, authorLineText, authorFontSize, authorColor);
     }
 
-    // 7. Encode to PNG
-    return Promise.resolve(canvas.toBuffer("image/png"));
+    // 6. Encode to PNG
+    const pngData: Uint8Array = await image.encode(0); // 0 for PNG, compression level default
+    return pngData;
 }
 
 
@@ -170,13 +166,12 @@ Deno.serve(async (req: Request) => {
                     { headers: { "Content-Type": "application/json" } }
                 );
             } else if (commandName === "Quote Message") {
-                // Check if canvas initialization failed on startup
-                if (!canvasInitialized) {
-                    console.warn("Quote Message command called, but canvas not initialized. Startup Error:", canvasInitializationError);
+                if (!mainFont || !italicFont) {
+                    console.warn("Quote Message command called, but font(s) not initialized. Startup Error:", fontInitializationError);
                     return new Response(
                         JSON.stringify({
                             type: 4,
-                            data: { content: `Sorry, the image generation module is not ready. ${canvasInitializationError ? `Startup Error: ${canvasInitializationError}` : 'Please check logs.'}` }
+                            data: { content: `Sorry, the image generation module is not ready. ${fontInitializationError ? `Font Error: ${fontInitializationError}` : 'Please check logs.'}` }
                         }),
                         { headers: { "Content-Type": "application/json" } }
                     );
@@ -193,15 +188,12 @@ Deno.serve(async (req: Request) => {
                 }
 
                 const author = message.author;
-                // Prefer member nickname if available (from resolved.members), fallback to global_name, then username.
-                // Note: interaction.data.resolved.members might contain the member object with 'nick'.
-                const member = commandData.resolved.members?.[author.id];
+                const member = commandData.resolved?.members?.[author.id];
                 const displayName = member?.nick || author.global_name || author.username;
-                
                 const messageContent = message.content || "[This message has no text content]";
 
                 try {
-                    console.log(`Generating quote for: "${messageContent}" by ${displayName}`);
+                    console.log(`Generating quote using imagescript for: "${messageContent}" by ${displayName}`);
                     const imageBytes = await generateSimpleQuoteImage(
                         displayName,
                         messageContent
@@ -211,10 +203,10 @@ Deno.serve(async (req: Request) => {
                     formData.append(
                         "payload_json",
                         JSON.stringify({
-                            type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
+                            type: 4,
                             data: {
                                 attachments: [{
-                                    id: 0, // Temporary ID for the attachment
+                                    id: 0,
                                     filename: "quote.png",
                                     description: `Quote of message by ${displayName}`
                                 }]
@@ -223,11 +215,11 @@ Deno.serve(async (req: Request) => {
                     );
                     formData.append("files[0]", new Blob([imageBytes], { type: "image/png" }), "quote.png");
                     
-                    console.log("Sending image response for quote.");
-                    return new Response(formData); // Deno Deploy handles FormData Content-Type
+                    console.log("Sending image response (imagescript) for quote.");
+                    return new Response(formData);
 
                 } catch (error) {
-                    console.error("Error during quote image generation or sending:", error);
+                    console.error("Error during quote image generation (imagescript) or sending:", error);
                     return new Response(
                         JSON.stringify({ type: 4, data: { content: `Sorry, I couldn't generate the quote image. Error: ${error.message}` } }),
                         { headers: { "Content-Type": "application/json" } }
