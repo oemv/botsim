@@ -1,6 +1,6 @@
 // main.ts - The truly fastest Discord bot handler on Deno Deploy (Web-only setup)
 
-// nacl for Discord signature verification (CRITICAL for security).
+// nacl for Discord signature verification (CRITICAL for security)
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
 
 // Helper to convert hex strings to Uint8Arrays for nacl verification.
