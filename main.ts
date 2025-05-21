@@ -1,10 +1,10 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-import initRsvg, { Resvg } from "https://deno.land/x/resvg_wasm@v0.6.0/mod.js";
+import initRsvg, { Resvg } from "https://deno.land/x/resvg_wasm@v0.2.0/mod.js";
 
 // Initialize resvg-wasm. This is crucial.
 // It needs to fetch the resvg_wasm_bg.wasm file.
-const rsvgWasmUrl = new URL("https://deno.land/x/resvg_wasm@v0.6.0/resvg_wasm_bg.wasm");
+const rsvgWasmUrl = new URL("https://deno.land/x/resvg_wasm@v0.2.0/resvg_wasm_bg.wasm");
 let rsvgInitialized = false;
 async function initializeRsvg() {
     if (rsvgInitialized) return;
