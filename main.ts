@@ -1,12 +1,10 @@
 // main.ts
 import nacl from "https://cdn.skypack.dev/tweetnacl@1.0.3";
-// Corrected resvg_wasm import to a generally available version.
-// If you found v0.2.0 works, ensure the URL is precise.
-// Let's assume v0.2.0 for this fix.
+// Ensure this resvg_wasm version and URL are correct and accessible for your Deno Deploy environment.
+// If v0.2.0 was problematic, you might need to find the latest stable tag on deno.land/x.
+// For example, if there's a v0.3.0 or similar, adjust both URLs.
 import initRsvg, { Resvg } from "https://deno.land/x/resvg_wasm@v0.2.0/mod.js";
 
-// Initialize resvg-wasm.
-// Ensure this URL matches the version of mod.js you are using.
 const rsvgWasmUrl = new URL("https://deno.land/x/resvg_wasm@v0.2.0/resvg_wasm_bg.wasm");
 let rsvgInitialized = false;
 async function initializeRsvg() {
@@ -14,7 +12,7 @@ async function initializeRsvg() {
     try {
         const wasmResponse = await fetch(rsvgWasmUrl);
         if (!wasmResponse.ok) {
-            throw new Error(`Failed to fetch resvg WASM: ${wasmResponse.status} ${await wasmResponse.text()}`);
+            throw new Error(`Failed to fetch resvg WASM (${rsvgWasmUrl}): ${wasmResponse.status} ${await wasmResponse.text()}`);
         }
         const wasmBinary = await wasmResponse.arrayBuffer();
         await initRsvg(wasmBinary);
@@ -22,7 +20,7 @@ async function initializeRsvg() {
         console.log("resvg-wasm initialized successfully.");
     } catch (e) {
         console.error("Error initializing resvg-wasm:", e);
-        throw e; // Re-throw to prevent the bot from starting in a broken state
+        throw e;
     }
 }
 
@@ -42,7 +40,7 @@ function escapeXml(unsafe: string): string {
             case '<': return '<';
             case '>': return '>';
             case '&': return '&';
-            case '\'': return '''; // Corrected line
+            case '\'': return '''; // THIS IS THE CRITICAL FIX
             case '"': return '"';
             default: return c;
         }
@@ -53,7 +51,7 @@ function escapeXml(unsafe: string): string {
 function wrapSvgText(text: string, maxWidth: number, charWidthEstimate: number): string[] {
     if (!text) return [];
     const lines: string[] = [];
-    const charsPerLine = Math.max(1, Math.floor(maxWidth / charWidthEstimate)); // Ensure charsPerLine is at least 1
+    const charsPerLine = Math.max(1, Math.floor(maxWidth / charWidthEstimate));
 
     let currentLine = "";
     const words = text.split(' ');
@@ -67,7 +65,6 @@ function wrapSvgText(text: string, maxWidth: number, charWidthEstimate: number):
             lines.push(currentLine);
             currentLine = word;
         }
-        // Handle words longer than charsPerLine
         while (currentLine.length > charsPerLine) {
             lines.push(currentLine.substring(0, charsPerLine));
             currentLine = currentLine.substring(charsPerLine);
@@ -82,21 +79,20 @@ function wrapSvgText(text: string, maxWidth: number, charWidthEstimate: number):
 
 async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Array, fileName: string }> {
     if (!rsvgInitialized) {
-      console.warn("resvg not initialized, attempting now...");
-      await initializeRsvg(); // Ensure resvg is initialized
+      console.warn("resvg not initialized prior to createImageForQuote, attempting now...");
+      await initializeRsvg();
       if (!rsvgInitialized) {
-          throw new Error("Failed to initialize resvg for image creation.");
+          throw new Error("Failed to initialize resvg for image creation after lazy attempt.");
       }
     }
 
     const author = message.author;
-    const content = message.content || " "; // Ensure content is not empty or undefined
+    const content = message.content || " ";
     const avatarHash = author.avatar;
     const userId = author.id;
-    const username = author.global_name || author.username; // Prefer global_name
+    const username = author.global_name || author.username;
 
     const avatarSize = 96;
-    // Use .png for potentially animated avatars, though SVG rendering will make it static
     const avatarUrl = avatarHash ? `https://cdn.discordapp.com/avatars/${userId}/${avatarHash}.png?size=${avatarSize}` : null;
     let avatarBase64 = "";
 
@@ -116,18 +112,18 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
         }
     }
 
-    const sidePadding = 20; // Increased padding
-    const topBottomPadding = 20; // Increased padding
+    const sidePadding = 20;
+    const topBottomPadding = 20;
     const avatarTextGap = 15;
     const textInnerPadding = 15;
 
-    const fontSize = 18; // Slightly larger font
+    const fontSize = 18;
     const usernameFontSize = 16;
-    const lineHeight = fontSize * 1.4; // Increased line height
+    const lineHeight = fontSize * 1.4;
     const usernameLineHeight = usernameFontSize * 1.4;
     const maxTextContentWidth = 350;
 
-    const charWidthEstimate = fontSize * 0.55; // Adjusted estimate
+    const charWidthEstimate = fontSize * 0.55;
     const usernameCharWidthEstimate = usernameFontSize * 0.55;
 
     const wrappedUsernameLines = wrapSvgText(username, maxTextContentWidth, usernameCharWidthEstimate);
@@ -141,18 +137,11 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
     const textContainerMinHeight = avatarBase64 ? avatarSize : (usernameBlockHeight + contentBlockHeight + gapBetweenUserAndContent);
     const textContainerActualHeight = Math.max(textContainerMinHeight, textBlockHeight);
     const textContainerPaddedHeight = textContainerActualHeight + 2 * textInnerPadding;
-
-
-    let maxLineTextWidth = 0;
-    const tempSvgForTextMeasure = `<svg xmlns="http://www.w3.org/2000/svg"><text style="font: bold ${usernameFontSize}px sans-serif;">${escapeXml(wrappedUsernameLines.join(""))}</text><text style="font: ${fontSize}px sans-serif;">${escapeXml(wrappedContentLines.join(""))}</text></svg>`;
-    // Note: True text measurement in SVG without rendering is complex. This is a rough approximation.
-    // For more accuracy, one might need to render to a tiny canvas or use more sophisticated SVG text metrics.
-    // We'll base width on wrapped lines and char estimates primarily.
     
     let dynamicTextContentWidth = 0;
     wrappedUsernameLines.forEach(line => dynamicTextContentWidth = Math.max(dynamicTextContentWidth, line.length * usernameCharWidthEstimate));
     wrappedContentLines.forEach(line => dynamicTextContentWidth = Math.max(dynamicTextContentWidth, line.length * charWidthEstimate));
-    dynamicTextContentWidth = Math.min(maxTextContentWidth, dynamicTextContentWidth);
+    dynamicTextContentWidth = Math.min(maxTextContentWidth, Math.max(50, dynamicTextContentWidth)); // Ensure a minimum width
 
 
     const textContainerWidth = dynamicTextContentWidth + 2 * textInnerPadding;
@@ -165,7 +154,7 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
         .username { font-family: 'Noto Sans', 'DejaVu Sans', sans-serif; font-weight: bold; font-size: ${usernameFontSize}px; fill: #FFFFFF; }
         .content { font-family: 'Noto Sans', 'DejaVu Sans', sans-serif; font-size: ${fontSize}px; fill: #E0E0E0; white-space: pre-wrap; }
     </style>`;
-    svgString += `<rect width="100%" height="100%" fill="#23272A"/>`; // Discord dark theme background
+    svgString += `<rect width="100%" height="100%" fill="#23272A"/>`;
 
     const avatarX = sidePadding;
     const avatarY = topBottomPadding + (textContainerPaddedHeight - avatarSize) / 2;
@@ -178,13 +167,12 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
     const textContainerX = sidePadding + (avatarBase64 ? avatarSize + avatarTextGap : 0);
     const textContainerY = topBottomPadding;
 
-    // Semi-transparent background for the text area
-    svgString += `<rect x="${textContainerX}" y="${textContainerY}" width="${textContainerWidth}" height="${textContainerPaddedHeight}" fill="rgba(0,0,0,0.55)" rx="8" ry="8"/>`; // Rounded corners
+    svgString += `<rect x="${textContainerX}" y="${textContainerY}" width="${textContainerWidth}" height="${textContainerPaddedHeight}" fill="rgba(0,0,0,0.55)" rx="8" ry="8"/>`;
 
     let currentTextY = textContainerY + textInnerPadding;
 
     if (wrappedUsernameLines.length > 0) {
-        currentTextY += usernameFontSize; // SVG text y is baseline
+        currentTextY += usernameFontSize; 
         for (const line of wrappedUsernameLines) {
             svgString += `<text x="${textContainerX + textInnerPadding}" y="${currentTextY}" class="username">${escapeXml(line)}</text>`;
             currentTextY += usernameLineHeight;
@@ -192,14 +180,19 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
     }
 
     currentTextY += gapBetweenUserAndContent;
-    if (wrappedUsernameLines.length > 0 && wrappedContentLines.length > 0 && gapBetweenUserAndContent > 0) {
-        // currentTextY -= usernameLineHeight; // Adjust if gap is purely visual, not for text start
-    }
-
-
+    
     if (wrappedContentLines.length > 0) {
-        if (wrappedUsernameLines.length === 0) currentTextY += fontSize; // Adjust for baseline if no username
-        else currentTextY += (fontSize - usernameFontSize); // Adjust based on previous line type
+        if (wrappedUsernameLines.length === 0) { // If no username, first line of content needs initial font size offset
+            currentTextY += fontSize;
+        } else if (gapBetweenUserAndContent === 0 && wrappedUsernameLines.length > 0) {
+            // This case should ideally not happen if both have content and gap is defined
+            // but if it did, we'd need to ensure currentTextY is properly positioned after username
+        } else if (wrappedUsernameLines.length > 0) {
+            // currentTextY is already advanced past username block and gap
+            // Add first line's font size for its baseline
+             currentTextY += fontSize;
+        }
+
 
         for (const line of wrappedContentLines) {
             svgString += `<text x="${textContainerX + textInnerPadding}" y="${currentTextY}" class="content">${escapeXml(line)}</text>`;
@@ -211,21 +204,17 @@ async function createImageForQuote(message: any): Promise<{ imageBuffer: Uint8Ar
 
     try {
         const resvg = new Resvg(svgString, {
-            // Removed fitTo to use the explicit width/height from SVG root
             font: {
-                loadSystemFonts: false, // Important for Deno Deploy consistency
-                defaultFontFamily: "Noto Sans", // A common sans-serif font
-                // You can bundle .ttf files with your deployment and provide them here if needed:
-                // fontFiles: ["./path/to/your/font.ttf"]
+                loadSystemFonts: false, 
+                defaultFontFamily: "Noto Sans",
             },
-            // logLevel: "debug" // For more verbose output from resvg if needed
         });
         const pngData = resvg.render();
         const imageBuffer = pngData.asPng();
         return { imageBuffer, fileName: "quote.png" };
     } catch (e) {
         console.error("Error rendering SVG with resvg:", e);
-        console.error("SVG Content that failed:", svgString);
+        console.error("SVG Content that failed (first 500 chars):", svgString.substring(0, 500));
         throw new Error(`Failed to render quote image using resvg: ${e.message}`);
     }
 }
@@ -265,9 +254,9 @@ Deno.serve(async (req: Request) => {
                 const commandData = interaction.data;
                 const commandName = commandData.name;
 
-                if (commandData.type === 1 && commandName === "ping") { // CHAT_INPUT (slash command)
+                if (commandData.type === 1 && commandName === "ping") { 
                     return new Response(JSON.stringify({ type: 4, data: { content: "Pong!" } }), { headers: { "Content-Type": "application/json" } });
-                } else if (commandData.type === 3 && commandName === "Quote Message") { // MESSAGE context menu command
+                } else if (commandData.type === 3 && commandName === "Quote Message") { 
                     const targetMessageId = commandData.target_id;
                     const messages = commandData.resolved?.messages;
                     const targetMessage = messages?.[targetMessageId];
@@ -277,19 +266,13 @@ Deno.serve(async (req: Request) => {
                         return new Response(JSON.stringify({ type: 4, data: { content: "Could not find the target message data." } }), { headers: { "Content-Type": "application/json" } });
                     }
                     
-                    // For potentially >3s operations, a deferral (type 5) is needed.
-                    // Then you'd use fetch to PATCH followup to:
-                    // `https://discord.com/api/v10/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`
-                    // For now, we attempt a direct response. If it times out, implement deferral.
-
                     try {
                         const { imageBuffer, fileName } = await createImageForQuote(targetMessage);
 
                         const formData = new FormData();
                         const payloadJson = {
-                            type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
+                            type: 4, 
                             data: {
-                                // content: "Here's your quote:", // Optional content
                                 attachments: [{
                                     id: "0", 
                                     filename: fileName,
@@ -318,13 +301,10 @@ Deno.serve(async (req: Request) => {
     }
 });
 
-// Initialize resvg when the module loads.
 (async () => {
     try {
         await initializeRsvg();
     } catch (e) {
-        console.error("Top-level resvg initialization failed. The bot might not be able to generate images.", e);
-        // Depending on how critical image generation is, you might want to exit or handle this.
-        // For Deno Deploy, the process will likely restart if it crashes here.
+        console.error("Top-level resvg initialization failed. The bot may not generate images correctly.", e);
     }
 })();
