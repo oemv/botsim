@@ -117,6 +117,13 @@ function deserializeGameState(str: string): GameState | null {
         const parts = str.split("|");
         let currentIdx = 0;
 
+        // ADD THIS CHECK:
+        const EXPECTED_PARTS = 11; // player(3) + redCuboid(3) + blueCuboid(3) + gameOver(1) + lastInteractionTime(1)
+        if (parts.length !== EXPECTED_PARTS) {
+            console.error(`Deserialization failed: Incorrect number of parts. Expected ${EXPECTED_PARTS}, got ${parts.length}. Input: "${str}" Parts:`, parts);
+            return null;
+        }
+
         const player: PlayerState = {
             x: parseFloat(parts[currentIdx++]),
             y: parseFloat(parts[currentIdx++]),
@@ -131,30 +138,27 @@ function deserializeGameState(str: string): GameState | null {
 
         const blueCuboid: BlueCuboidState = {
             warningActive: parts[currentIdx++] === "1",
-            warningEmoji: decodeURIComponent(parts[currentIdx++]), // Decode emoji
+            warningEmoji: decodeURIComponent(parts[currentIdx++]),
             turnsLeft: parseInt(parts[currentIdx++]),
         };
-
+        
         const gameOver = parts[currentIdx++] === "1";
         const lastInteractionTime = parseInt(parts[currentIdx++]);
 
-        // Construct the full state object
         const state: GameState = {
             player,
             redCuboid,
             blueCuboid,
-            // map: MAZE_LAYOUT, // MAZE_LAYOUT is global, not part of serialized string
-            message: "", // Will be populated by game logic or render function
+            message: "",
             gameOver,
             lastInteractionTime,
         };
-
-        // Basic validation to catch common errors from parsing
+        
         if (Number.isNaN(player.x) || Number.isNaN(player.y) || Number.isNaN(player.angle) ||
             Number.isNaN(redCuboid.x) || Number.isNaN(redCuboid.y) ||
             Number.isNaN(blueCuboid.turnsLeft)) {
             console.error("Deserialization resulted in NaN values:", str, state);
-            return null; // Indicate error
+            return null;
         }
         return state;
     } catch (e) {
