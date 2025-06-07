@@ -18,8 +18,8 @@ Deno.serve(async (req: Request) => {
             type: 1, // CHAT_INPUT
         },
         {
-            name: "doom",
-            description: "Starts a mini Doom-style emoji shooter game!",
+            name: "maze",
+            description: "Play a 3D maze game! Navigate, avoid the Red Cuboid, and react to Blue Cuboid warnings.",
             type: 1, // CHAT_INPUT
         },
     ];
